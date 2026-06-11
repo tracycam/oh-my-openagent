@@ -1665,20 +1665,15 @@ The fallback retry session is now created and can be inspected directly.
       task.progress.lastUpdate = partInfo?.activityTime ?? new Date()
 
       if (partInfo?.type === "tool" || partInfo?.tool) {
-        const countedToolPartIDs = task.progress.countedToolPartIDs ?? new Set<string>()
-        const shouldCountToolCall =
-          !partInfo.id ||
-          partInfo.state?.status !== "running" ||
-          !countedToolPartIDs.has(partInfo.id)
-
-        if (!shouldCountToolCall) {
-          return
-        }
-
-        if (partInfo.id && partInfo.state?.status === "running") {
+        if (partInfo.id) {
+          const countedToolPartIDs = task.progress.countedToolPartIDs ?? new Set<string>()
+          if (countedToolPartIDs.has(partInfo.id)) {
+            return
+          }
           countedToolPartIDs.add(partInfo.id)
           task.progress.countedToolPartIDs = countedToolPartIDs
         }
+
 
         task.progress.toolCalls += 1
         task.progress.lastTool = partInfo.tool
