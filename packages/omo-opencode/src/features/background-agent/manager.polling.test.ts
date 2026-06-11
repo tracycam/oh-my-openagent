@@ -276,7 +276,7 @@ describe("BackgroundManager pollRunningTasks", () => {
       expect(task.status).toBe("completed")
     })
 
-    test("#when output was already observed from events #then it completes without fetching messages", async () => {
+    test("#when output was already observed from events #then it completes after verifying the final finish reason", async () => {
       //#given
       let messagesCallCount = 0
       const manager = createManagerWithClient({
@@ -306,7 +306,7 @@ describe("BackgroundManager pollRunningTasks", () => {
 
       //#then
       expect(task.status).toBe("completed")
-      expect(messagesCallCount).toBe(0)
+      expect(messagesCallCount).toBe(1)
     })
 
     test("#when todo state was already observed from events #then it completes without fetching todos", async () => {

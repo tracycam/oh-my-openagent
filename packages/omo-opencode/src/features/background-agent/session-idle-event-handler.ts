@@ -10,6 +10,7 @@ export function handleSessionIdleBackgroundEvent(args: {
   validateSessionHasOutput: (sessionID: string) => Promise<boolean>
   checkSessionTodos: (sessionID: string) => Promise<boolean>
   tryCompleteTask: (task: BackgroundTask, source: string) => Promise<boolean>
+  tryFailTerminalTask?: (task: BackgroundTask, source: string) => Promise<boolean>
   emitIdleEvent: (sessionID: string) => void
 }): void {
   const {
@@ -19,6 +20,7 @@ export function handleSessionIdleBackgroundEvent(args: {
     validateSessionHasOutput,
     checkSessionTodos,
     tryCompleteTask,
+    tryFailTerminalTask,
     emitIdleEvent,
   } = args
 
@@ -66,8 +68,12 @@ export function handleSessionIdleBackgroundEvent(args: {
         return
       }
 
-      const hasIncompleteTodos = await checkSessionTodos(sessionID)
+      if (await tryFailTerminalTask?.(task, "session.idle event")) {
+        return
+      }
 
+
+      const hasIncompleteTodos = await checkSessionTodos(sessionID)
       if (task.status !== "running") {
         log("[background-agent] Task status changed during todo check, skipping:", {
           taskId: task.id,

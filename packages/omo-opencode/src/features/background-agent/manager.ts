@@ -260,6 +260,8 @@ export class BackgroundManager {
   private readonly parentWakeNotifier: ParentWakeNotifier
   private parentWakeTextDeltaBuffers: Map<string, string> = new Map()
   private observedOutputSessions: Set<string> = new Set()
+  private lengthFinishedSessions: Set<string> = new Set()
+  private lengthFinishCheckedSessions: Set<string> = new Set()
   private observedIncompleteTodosBySession: Map<string, boolean> = new Map()
   private rootDescendantCounts: Map<string, number>
   private preStartDescendantReservations: Set<string>
@@ -1574,6 +1576,7 @@ The fallback retry session is now created and can be inspected directly.
       const sessionID = resolveMessageEventSessionID(props)
       const role = info.role
       if (!sessionID) return
+      this.lengthFinishCheckedSessions.delete(sessionID)
       if (isEmptyNoProgressAssistantTurnInfo(info)) {
         const dispatchedWake = this.parentWakeNotifier.getDispatchedParentWakes().get(sessionID)
         if (dispatchedWake) {
@@ -1599,6 +1602,16 @@ The fallback retry session is now created and can be inspected directly.
       const { task } = resolved
       if (task.status !== "running") return
 
+      // Record length-finish truncation so completion paths can fail the task.
+      // When finish === "length", the model hit max_tokens and the output is truncated.
+      const finish = info.finish
+      if (finish === "length") {
+        this.lengthFinishedSessions.add(sessionID)
+        this.lengthFinishCheckedSessions.add(sessionID)
+      } else if (finish) {
+        this.lengthFinishCheckedSessions.add(sessionID)
+      }
+
       const assistantError = info.error
       if (!assistantError) return
 
@@ -1620,6 +1633,7 @@ The fallback retry session is now created and can be inspected directly.
       const sessionID = resolveMessageEventSessionID(props)
       if (!sessionID) return
       if (!isMessagePartForSession(partInfo, sessionID)) return
+      this.lengthFinishCheckedSessions.delete(sessionID)
       const isUserPart = partInfo?.role === "user"
       const isInternalWakePart = isInternalInitiatorTextPart(partInfo, sessionID)
       const dispatchedWake = this.parentWakeNotifier.getDispatchedParentWakes().get(sessionID)
@@ -1755,7 +1769,8 @@ The fallback retry session is now created and can be inspected directly.
         idleDeferralTimers: this.idleDeferralTimers,
         validateSessionHasOutput: (id) => this.validateSessionHasOutput(id),
         checkSessionTodos: (id) => this.checkSessionTodos(id),
-        tryCompleteTask: (task, source) => this.tryCompleteTask(task, source),
+        tryCompleteTask: (task, source) => this.tryCompleteTask(task, source, { skipLengthFinishCheck: true }),
+        tryFailTerminalTask: (task, source) => this.tryFailLengthFinishedTask(task, source),
         emitIdleEvent: (sessionID) => this.handleEvent({ type: "session.idle", properties: { sessionID } }),
       })
     }
@@ -2046,6 +2061,8 @@ The fallback retry session is now created and can be inspected directly.
     }
     this.scheduleTaskRemoval(task.id)
     if (task.sessionId) {
+      this.lengthFinishedSessions.delete(task.sessionId)
+      this.lengthFinishCheckedSessions.delete(task.sessionId)
       clearDelegatedChildSessionBootstrap(task.sessionId)
       SessionCategoryRegistry.remove(task.sessionId)
     }
@@ -2109,6 +2126,8 @@ The task was re-queued on a fallback model after a retryable failure.
     if (retried && previousSessionID) {
       this.clearSessionOutputObserved(previousSessionID)
       this.clearSessionTodoObservation(previousSessionID)
+      this.lengthFinishedSessions.delete(previousSessionID)
+      this.lengthFinishCheckedSessions.delete(previousSessionID)
       clearDelegatedChildSessionBootstrap(previousSessionID)
       subagentSessions.delete(previousSessionID)
     }
@@ -2162,6 +2181,20 @@ The task was re-queued on a fallback model after a retryable failure.
       }, this.directory)
 
       const messages = normalizeSDKResponse(response, [] as Array<{ info?: { role?: string } }>, { preferResponseOnMissingData: true })
+
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index] as {
+          info?: { role?: string; finish?: unknown }
+          finish?: unknown
+        }
+        if (message.info?.role !== "assistant") continue
+        this.lengthFinishCheckedSessions.add(sessionID)
+        if (this.getAssistantFinish(message) === "length") {
+          this.lengthFinishedSessions.add(sessionID)
+          return true
+        }
+        break
+      }
 
       // Check for at least one assistant or tool message
       const hasAssistantOrToolMessage = messages.some(
@@ -2274,6 +2307,8 @@ The task was re-queued on a fallback model after a retryable failure.
       this.clearTaskHistoryWhenParentTasksGone(task.parentSessionId)
       if (task.sessionId) {
         subagentSessions.delete(task.sessionId)
+        this.lengthFinishedSessions.delete(task.sessionId)
+        this.lengthFinishCheckedSessions.delete(task.sessionId)
         clearDelegatedChildSessionBootstrap(task.sessionId)
         SessionCategoryRegistry.remove(task.sessionId)
       }
@@ -2435,11 +2470,19 @@ The task was re-queued on a fallback model after a retryable failure.
    * Safely complete a task with race condition protection.
    * Returns true if task was successfully completed, false if already completed by another path.
    */
-  private async tryCompleteTask(task: BackgroundTask, source: string): Promise<boolean> {
+  private async tryCompleteTask(
+    task: BackgroundTask,
+    source: string,
+    options?: { skipLengthFinishCheck?: boolean },
+  ): Promise<boolean> {
     // Guard: Check if task is still running (could have been completed by another path)
     if (task.status !== "running") {
       log("[background-agent] Task already completed, skipping:", { taskId: task.id, status: task.status, source })
       return false
+    }
+
+    if (!options?.skipLengthFinishCheck && await this.tryFailLengthFinishedTask(task, source)) {
+      return true
     }
 
     // Atomically mark as completed to prevent race conditions
@@ -2475,6 +2518,8 @@ The task was re-queued on a fallback model after a retryable failure.
       // Awaited to prevent dangling promise during subagent teardown (Bun/WebKit SIGABRT)
       await this.abortSessionWithLogging(task.sessionId, `task completion (${source})`)
 
+      this.lengthFinishedSessions.delete(task.sessionId)
+      this.lengthFinishCheckedSessions.delete(task.sessionId)
       clearDelegatedChildSessionBootstrap(task.sessionId)
       SessionCategoryRegistry.remove(task.sessionId)
     }
@@ -2487,6 +2532,150 @@ The task was re-queued on a fallback model after a retryable failure.
     try {
       await this.enqueueNotificationForParent(task.parentSessionId, () => this.notifyParentSession(task))
       log(`[background-agent] Task completed via ${source}:`, task.id)
+    } catch (err) {
+      log("[background-agent] Error in notifyParentSession:", { taskId: task.id, error: err })
+      // Concurrency already released, notification failed but task is complete
+    }
+
+    return true
+  }
+
+  /**
+   * Check if a task's session was truncated due to length limits and fail it.
+   * Returns true if task was failed, false if no length truncation detected.
+   */
+  private async tryFailLengthFinishedTask(task: BackgroundTask, source: string): Promise<boolean> {
+    if (!task.sessionId) return false
+
+    if (!this.lengthFinishedSessions.has(task.sessionId)) {
+      const lengthFinishError = await this.getLengthFinishError(task.sessionId)
+      if (!lengthFinishError) return false
+    }
+
+    return this.failTask(
+      task,
+      "Subagent response stopped by length before completing output",
+      source,
+      `${source} (finish:length)`,
+    )
+  }
+
+  /**
+   * Re-fetch session messages and check if the last assistant message was truncated.
+   * Adds sessionID to lengthFinishCheckedSessions to avoid re-fetching.
+   */
+  private async getLengthFinishError(sessionID: string): Promise<string | undefined> {
+    if (this.lengthFinishCheckedSessions.has(sessionID) && !this.lengthFinishedSessions.has(sessionID)) {
+      return undefined
+    }
+
+    try {
+      const response = await messagesInDirectory(this.client, {
+        path: { id: sessionID },
+      }, this.directory)
+      const messages = normalizeSDKResponse(
+        response,
+        [] as Array<{ info?: { role?: string; finish?: unknown }; finish?: unknown }>,
+        { preferResponseOnMissingData: true },
+      )
+
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index] as {
+          info?: { role?: string; finish?: unknown }
+          finish?: unknown
+        }
+        if (message.info?.role !== "assistant") continue
+
+        this.lengthFinishCheckedSessions.add(sessionID)
+        const finish = this.getAssistantFinish(message)
+        if (finish === "length") {
+          this.lengthFinishedSessions.add(sessionID)
+          return "Subagent response stopped by length before completing output"
+        }
+        return undefined
+      }
+    } catch (error) {
+      log("[background-agent] Error checking for length-finish:", { sessionID, error })
+    }
+
+    return undefined
+  }
+
+  /**
+   * Extract the finish reason from an assistant message.
+   * Returns "length", "stop", "tool-calls", etc. or undefined if not present.
+   */
+  private getAssistantFinish(message: { info?: { finish?: unknown }; finish?: unknown }): string | undefined {
+    const infoFinish = typeof message.info?.finish === "string" ? message.info.finish : undefined
+    if (infoFinish) return infoFinish
+    const messageFinish = typeof message.finish === "string" ? message.finish : undefined
+    return messageFinish
+  }
+
+  /**
+   * Safely fail a task with race condition protection.
+   * Returns true if task was successfully failed, false if already completed by another path.
+   */
+  private async failTask(
+    task: BackgroundTask,
+    reason: string,
+    source: string,
+    notificationSource: string,
+  ): Promise<boolean> {
+    // Guard: Check if task is still running (could have been completed by another path)
+    if (task.status !== "running") {
+      log("[background-agent] Task already completed, skipping:", { taskId: task.id, status: task.status, source })
+      return false
+    }
+
+    // Atomically mark as failed to prevent race conditions
+    if (task.currentAttemptID) {
+      finalizeAttempt(task, task.currentAttemptID, "error", reason)
+    } else {
+      task.status = "error"
+      task.error = reason
+      task.completedAt = new Date()
+    }
+    this.taskHistory.record(task.parentSessionId, { id: task.id, sessionID: task.sessionId, agent: task.agent, description: task.description, status: "error", category: task.category, startedAt: task.startedAt, completedAt: task.completedAt })
+
+    if (task.rootSessionId) {
+      this.unregisterRootDescendant(task.rootSessionId)
+    }
+
+    removeTaskToastTracking(task.id)
+
+    // Release concurrency BEFORE any async operations to prevent slot leaks
+    if (task.concurrencyKey) {
+      this.concurrencyManager.release(task.concurrencyKey)
+      task.concurrencyKey = undefined
+    }
+
+    this.markForNotification(task)
+
+    const idleTimer = this.idleDeferralTimers.get(task.id)
+    if (idleTimer) {
+      clearTimeout(idleTimer)
+      this.idleDeferralTimers.delete(task.id)
+    }
+
+    if (task.sessionId) {
+      // Awaited to prevent dangling promise during subagent teardown (Bun/WebKit SIGABRT)
+      await this.abortSessionWithLogging(task.sessionId, `task failure (${notificationSource})`)
+
+      this.lengthFinishedSessions.delete(task.sessionId)
+      this.lengthFinishCheckedSessions.delete(task.sessionId)
+      clearDelegatedChildSessionBootstrap(task.sessionId)
+      SessionCategoryRegistry.remove(task.sessionId)
+    }
+
+    // Update continuation marker for CLI run mode
+    if (task.parentSessionId) {
+      this.updateBackgroundTaskMarker(task.parentSessionId)
+    }
+
+    try {
+      await this.enqueueNotificationForParent(task.parentSessionId, () => this.notifyParentSession(task))
+      log(`[background-agent] Task failed via ${notificationSource}:`, task.id)
     } catch (err) {
       log("[background-agent] Error in notifyParentSession:", { taskId: task.id, error: err })
       // Concurrency already released, notification failed but task is complete
@@ -2932,13 +3121,17 @@ The task was re-queued on a fallback model after a retryable failure.
           // Re-check status after async operation
           if (task.status !== "running") continue
 
+          if (await this.tryFailLengthFinishedTask(task, completionSource)) {
+            continue
+          }
+
           const hasIncompleteTodos = await this.checkSessionTodos(sessionID)
           if (hasIncompleteTodos) {
             log("[background-agent] Task has incomplete todos via polling, waiting:", task.id)
             continue
           }
 
-          await this.tryCompleteTask(task, completionSource)
+          await this.tryCompleteTask(task, completionSource, { skipLengthFinishCheck: true })
         } catch (error) {
           log("[background-agent] Poll error for task:", { taskId: task.id, error })
         }

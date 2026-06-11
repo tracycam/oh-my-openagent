@@ -59,7 +59,7 @@ function buildPartInfo(
   fallback: Record<string, unknown> | undefined,
 ): MessagePartInfo {
   return {
-    id: getStringField(source, "id") ?? getStringField(source, "partID") ?? getStringField(source, "callID"),
+    id: getStringField(source, "callID") ?? getStringField(source, "id") ?? getStringField(source, "partID"),
     sessionID: getStringField(source, "sessionID") ?? getStringField(fallback, "sessionID"),
     role: getStringField(source, "role") ?? getStringField(fallback, "role"),
     type: getStringField(source, "type") ?? getStringField(fallback, "type"),

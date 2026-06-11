@@ -60,4 +60,24 @@ describe("session.next stream activity", () => {
     expect(hasOutputSignalFromPart(partInfo, "ses-parent")).toBe(true)
     expect(isInternalInitiatorTextPart(partInfo, "ses-parent")).toBe(true)
   })
+
+  test("#given completed tool part includes part id and call id #when resolving part info #then call id is the stable identity", () => {
+    const partInfo = resolveMessagePartInfo({
+      sessionID: "ses-tools",
+      part: {
+        id: "prt-1",
+        callID: "call-1",
+        type: "tool",
+        tool: "grep",
+        state: {
+          status: "completed",
+          input: { pattern: "g_beacon_delay_raw" },
+        },
+      },
+    })
+
+    expect(partInfo?.id).toBe("call-1")
+    expect(partInfo?.tool).toBe("grep")
+    expect(partInfo?.state?.input).toEqual({ pattern: "g_beacon_delay_raw" })
+  })
 })

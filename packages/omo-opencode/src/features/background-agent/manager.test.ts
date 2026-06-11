@@ -313,6 +313,10 @@ async function tryCompleteTaskForTest(manager: BackgroundManager, task: Backgrou
     .tryCompleteTask(task, "test")
 }
 
+async function pollRunningTasksForTest(manager: BackgroundManager): Promise<void> {
+  return (cast<{ pollRunningTasks: () => Promise<void> }>(manager)).pollRunningTasks()
+}
+
 function stubNotifyParentSession(manager: BackgroundManager): void {
   ;(cast<{ notifyParentSession: () => Promise<void> }>(manager)).notifyParentSession = async () => {}
 }
@@ -7111,6 +7115,7 @@ describe("BackgroundManager.handleEvent - early session.idle deferral", () => {
 
       await tryCompleteTaskForTest(manager, task)
       expect(task.status).toBe("completed")
+      const messagesAfterManualCompletion = messagesCallCount
 
       // Advance time so deferred callback (if any) sees elapsed >= MIN_IDLE_TIME_MS
       Date.now = () => baseNow + (MIN_IDLE_TIME_MS + 10)
@@ -7118,7 +7123,7 @@ describe("BackgroundManager.handleEvent - early session.idle deferral", () => {
       //#then - deferred callback should be a no-op
       await new Promise((resolve) => setTimeout(resolve, remainingMs + 80))
       expect(task.status).toBe("completed")
-      expect(messagesCallCount).toBe(0)
+      expect(messagesCallCount).toBe(messagesAfterManualCompletion)
     } finally {
       Date.now = realDateNow
       manager.shutdown()
@@ -7127,6 +7132,122 @@ describe("BackgroundManager.handleEvent - early session.idle deferral", () => {
 })
 
 describe("BackgroundManager.handleEvent - non-tool event lastUpdate", () => {
+  test("should count running and completed events for the same tool call only once", async () => {
+    const client = {
+      session: {
+        prompt: async () => ({}),
+        promptAsync: async () => ({}),
+        abort: async () => ({}),
+      },
+    }
+    const manager = new BackgroundManager({
+      pluginContext: createPluginInput(client),
+      config: {
+        circuitBreaker: {
+          enabled: true,
+          maxToolCalls: 400,
+          consecutiveThreshold: 2,
+        },
+      },
+    })
+
+    const task: BackgroundTask = {
+      id: "task-same-callid-dedupe",
+      sessionId: "session-same-callid-dedupe",
+      parentSessionId: "parent-1",
+      parentMessageId: "msg-1",
+      description: "grep same call id",
+      prompt: "Find usages",
+      agent: "explore",
+      status: "running",
+      startedAt: new Date(Date.now() - 60_000),
+    }
+    getTaskMap(manager).set(task.id, task)
+
+    manager.handleEvent({
+      type: "session.next.tool.called",
+      properties: {
+        sessionID: task.sessionId,
+        callID: "call-grep-1",
+        tool: "grep",
+        input: { pattern: "g_beacon_delay_raw" },
+      },
+    })
+    manager.handleEvent({
+      type: "message.part.updated",
+      properties: {
+        sessionID: task.sessionId,
+        part: {
+          id: "prt-grep-1",
+          callID: "call-grep-1",
+          type: "tool",
+          tool: "grep",
+          state: {
+            status: "completed",
+            input: { pattern: "g_beacon_delay_raw" },
+          },
+        },
+      },
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(task.progress?.toolCalls).toBe(1)
+    expect(task.status).toBe("running")
+
+    manager.shutdown()
+  })
+
+  test("should not trip consecutive breaker for grep calls with different inputs", async () => {
+    const client = {
+      session: {
+        prompt: async () => ({}),
+        promptAsync: async () => ({}),
+        abort: async () => ({}),
+      },
+    }
+    const manager = new BackgroundManager({
+      pluginContext: createPluginInput(client),
+      config: {
+        circuitBreaker: {
+          enabled: true,
+          maxToolCalls: 400,
+          consecutiveThreshold: 3,
+        },
+      },
+    })
+
+    const task: BackgroundTask = {
+      id: "task-different-grep-inputs",
+      sessionId: "session-different-grep-inputs",
+      parentSessionId: "parent-1",
+      parentMessageId: "msg-1",
+      description: "grep different inputs",
+      prompt: "Find usages",
+      agent: "explore",
+      status: "running",
+      startedAt: new Date(Date.now() - 60_000),
+    }
+    getTaskMap(manager).set(task.id, task)
+
+    for (const pattern of ["g_beacon_delay_raw", "g_beacon_strength", "g_sys_beep_volume"]) {
+      manager.handleEvent({
+        type: "session.next.tool.called",
+        properties: {
+          sessionID: task.sessionId,
+          callID: `call-${pattern}`,
+          tool: "grep",
+          input: { pattern },
+        },
+      })
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(task.progress?.toolCalls).toBe(3)
+    expect(task.status).toBe("running")
+
+    manager.shutdown()
+  })
+
   test("should update lastUpdate on text-type message.part.updated event", () => {
     //#given - a running task with stale lastUpdate
     const client = {
@@ -7371,7 +7492,7 @@ describe("BackgroundManager.handleEvent - non-tool event lastUpdate", () => {
     expect(task.status).toBe("running")
   })
 
-  test("should complete idle task without fetching messages after output event was observed", async () => {
+  test("should complete idle task after checking final finish when output event was observed", async () => {
     //#given - a running task with observed output from message part events
     let messagesCallCount = 0
     let todoCallCount = 0
@@ -7422,11 +7543,320 @@ describe("BackgroundManager.handleEvent - non-tool event lastUpdate", () => {
     //#when - session.idle fires after output event was already observed
     manager.handleEvent({ type: "session.idle", properties: { sessionID } })
 
-    //#then - task completes without refetching session.messages
+    //#then - task still verifies the final finish reason before completing
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(task.status).toBe("completed")
-    expect(messagesCallCount).toBe(0)
+    expect(messagesCallCount).toBe(1)
     expect(todoCallCount).toBe(1)
+
+    manager.shutdown()
+  })
+
+  test("should fail idle task when final assistant message stopped by length", async () => {
+    const sessionID = "session-length-finish-idle"
+    const client = {
+      session: {
+        prompt: async () => ({}),
+        promptAsync: async () => ({}),
+        abort: async () => ({}),
+        messages: async () => ({
+          data: [
+            {
+              info: { role: "assistant", finish: "length" },
+              parts: [{ type: "text", text: "partial report that ended mid-sentence" }],
+            },
+          ],
+        }),
+        todo: async () => ({ data: [] }),
+      },
+    }
+    const manager = new BackgroundManager({ pluginContext: createPluginInput(client) })
+    stubNotifyParentSession(manager)
+
+    const task: BackgroundTask = {
+      id: "task-length-finish-idle",
+      sessionId: sessionID,
+      parentSessionId: "parent-session",
+      parentMessageId: "msg-1",
+      description: "length finish task",
+      prompt: "write a long report",
+      agent: "explore",
+      status: "running",
+      startedAt: new Date(Date.now() - (MIN_IDLE_TIME_MS + 10)),
+    }
+    getTaskMap(manager).set(task.id, task)
+
+    manager.handleEvent({ type: "session.idle", properties: { sessionID } })
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(task.status).toBe("error")
+    expect(task.error).toContain("length")
+
+    manager.shutdown()
+  })
+
+  test("should fail idle task when top-level assistant finish stopped by length", async () => {
+    const sessionID = "session-top-level-length-finish-idle"
+    const client = {
+      session: {
+        prompt: async () => ({}),
+        promptAsync: async () => ({}),
+        abort: async () => ({}),
+        messages: async () => ({
+          data: [
+            {
+              info: { role: "assistant" },
+              finish: "length",
+              parts: [],
+            },
+          ],
+        }),
+        todo: async () => ({ data: [] }),
+      },
+    }
+    const manager = new BackgroundManager({ pluginContext: createPluginInput(client) })
+    stubNotifyParentSession(manager)
+
+    const task: BackgroundTask = {
+      id: "task-top-level-length-finish-idle",
+      sessionId: sessionID,
+      parentSessionId: "parent-session",
+      parentMessageId: "msg-1",
+      description: "top-level length finish task",
+      prompt: "write a long report",
+      agent: "explore",
+      status: "running",
+      startedAt: new Date(Date.now() - (MIN_IDLE_TIME_MS + 10)),
+    }
+    getTaskMap(manager).set(task.id, task)
+
+    manager.handleEvent({ type: "session.idle", properties: { sessionID } })
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(task.status).toBe("error")
+    expect(task.error).toContain("length")
+
+    manager.shutdown()
+  })
+
+  test("should fail length-finished idle task before todo checks can block completion", async () => {
+    let todoCallCount = 0
+    const sessionID = "session-length-finish-with-todos"
+    const client = {
+      session: {
+        prompt: async () => ({}),
+        promptAsync: async () => ({}),
+        abort: async () => ({}),
+        messages: async () => ({
+          data: [
+            {
+              info: { role: "assistant", finish: "length" },
+              parts: [],
+            },
+          ],
+        }),
+        todo: async () => {
+          todoCallCount += 1
+          return { data: [{ status: "pending" }] }
+        },
+      },
+    }
+    const manager = new BackgroundManager({ pluginContext: createPluginInput(client) })
+    stubNotifyParentSession(manager)
+
+    const task: BackgroundTask = {
+      id: "task-length-finish-with-todos",
+      sessionId: sessionID,
+      parentSessionId: "parent-session",
+      parentMessageId: "msg-1",
+      description: "length finish with todos",
+      prompt: "write a long report",
+      agent: "explore",
+      status: "running",
+      startedAt: new Date(Date.now() - (MIN_IDLE_TIME_MS + 10)),
+    }
+    getTaskMap(manager).set(task.id, task)
+
+    manager.handleEvent({ type: "session.idle", properties: { sessionID } })
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(task.status).toBe("error")
+    expect(task.error).toContain("length")
+    expect(todoCallCount).toBe(0)
+
+    manager.shutdown()
+  })
+
+  test("should fail polling length-finished task before todo checks can block completion", async () => {
+    let todoCallCount = 0
+    let abortCallCount = 0
+    const sessionID = "session-length-finish-polling-with-todos"
+    const client = {
+      session: {
+        prompt: async () => ({}),
+        promptAsync: async () => ({}),
+        abort: async () => {
+          abortCallCount += 1
+          return {}
+        },
+        status: async () => ({ data: { [sessionID]: { type: "idle" } } }),
+        messages: async () => ({
+          data: [
+            {
+              info: { role: "assistant", finish: "length" },
+              parts: [],
+            },
+          ],
+        }),
+        todo: async () => {
+          todoCallCount += 1
+          return { data: [{ status: "pending" }] }
+        },
+      },
+    }
+    const manager = new BackgroundManager({ pluginContext: createPluginInput(client) })
+    stubNotifyParentSession(manager)
+
+    const task: BackgroundTask = {
+      id: "task-length-finish-polling-with-todos",
+      sessionId: sessionID,
+      parentSessionId: "parent-session",
+      parentMessageId: "msg-1",
+      description: "polling length finish with todos",
+      prompt: "write a long report",
+      agent: "explore",
+      status: "running",
+      startedAt: new Date(Date.now() - (MIN_IDLE_TIME_MS + 10)),
+    }
+    getTaskMap(manager).set(task.id, task)
+
+    await pollRunningTasksForTest(manager)
+
+    expect(task.status).toBe("error")
+    expect(task.error).toContain("length")
+    expect(todoCallCount).toBe(0)
+    expect(abortCallCount).toBe(1)
+
+    manager.shutdown()
+  })
+
+  test("should still fail length-finished task after streamed output was observed", async () => {
+    let messagesCallCount = 0
+    let abortCallCount = 0
+    const sessionID = "session-length-finish-after-stream"
+    const client = {
+      session: {
+        prompt: async () => ({}),
+        promptAsync: async () => ({}),
+        abort: async () => {
+          abortCallCount += 1
+          return {}
+        },
+        messages: async () => {
+          messagesCallCount += 1
+          return {
+            data: [
+              {
+                info: { role: "assistant", finish: "length" },
+                parts: [{ type: "text", text: "partial streamed report" }],
+              },
+            ],
+          }
+        },
+        todo: async () => ({ data: [] }),
+      },
+    }
+    const manager = new BackgroundManager({ pluginContext: createPluginInput(client) })
+    stubNotifyParentSession(manager)
+
+    const task: BackgroundTask = {
+      id: "task-length-finish-after-stream",
+      sessionId: sessionID,
+      parentSessionId: "parent-session",
+      parentMessageId: "msg-1",
+      description: "length finish after stream",
+      prompt: "write a long report",
+      agent: "explore",
+      status: "running",
+      startedAt: new Date(Date.now() - (MIN_IDLE_TIME_MS + 10)),
+    }
+    getTaskMap(manager).set(task.id, task)
+
+    manager.handleEvent({
+      type: "message.part.updated",
+      properties: { sessionID, type: "text" },
+    })
+    manager.handleEvent({
+      type: "message.updated",
+      properties: {
+        sessionID,
+        info: { role: "assistant", finish: "length" },
+      },
+    })
+    manager.handleEvent({ type: "session.idle", properties: { sessionID } })
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(task.status).toBe("error")
+    expect(task.error).toContain("length")
+    expect(messagesCallCount).toBe(0)
+    expect(abortCallCount).toBe(1)
+
+    manager.shutdown()
+  })
+
+  test("should fail length-finished idle task after streamed output even without message.updated", async () => {
+    let todoCallCount = 0
+    let abortCallCount = 0
+    const sessionID = "session-length-finish-stream-only"
+    const client = {
+      session: {
+        prompt: async () => ({}),
+        promptAsync: async () => ({}),
+        abort: async () => {
+          abortCallCount += 1
+          return {}
+        },
+        messages: async () => ({
+          data: [
+            {
+              info: { role: "assistant", finish: "length" },
+              parts: [{ type: "text", text: "partial streamed report" }],
+            },
+          ],
+        }),
+        todo: async () => {
+          todoCallCount += 1
+          return { data: [{ status: "pending" }] }
+        },
+      },
+    }
+    const manager = new BackgroundManager({ pluginContext: createPluginInput(client) })
+    stubNotifyParentSession(manager)
+
+    const task: BackgroundTask = {
+      id: "task-length-finish-stream-only",
+      sessionId: sessionID,
+      parentSessionId: "parent-session",
+      parentMessageId: "msg-1",
+      description: "stream-only length finish",
+      prompt: "write a long report",
+      agent: "explore",
+      status: "running",
+      startedAt: new Date(Date.now() - (MIN_IDLE_TIME_MS + 10)),
+    }
+    getTaskMap(manager).set(task.id, task)
+
+    manager.handleEvent({
+      type: "message.part.updated",
+      properties: { sessionID, type: "text" },
+    })
+    manager.handleEvent({ type: "session.idle", properties: { sessionID } })
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(task.status).toBe("error")
+    expect(task.error).toContain("length")
+    expect(todoCallCount).toBe(0)
+    expect(abortCallCount).toBe(1)
 
     manager.shutdown()
   })
