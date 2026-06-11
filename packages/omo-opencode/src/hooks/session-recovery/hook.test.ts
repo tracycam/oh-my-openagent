@@ -403,6 +403,78 @@ describe("session-recovery hook interrupted idle recovery", () => {
     expect(promptAsyncCalls[0]?.body.variant).toBe("max")
   })
 
+  test("#given idle session has an unfinished assistant turn with pending tool parts #when handleInterruptedToolResultsOnIdle is called concurrently #then exactly one prompt dispatches", async () => {
+    // given
+    const promptAsyncCalls: PromptAsyncCall[] = []
+    let messagesCallResolvers: Array<() => void> = []
+    const messagesGateOpen = new Promise<void>((resolve) => {
+      messagesCallResolvers.push(resolve)
+    })
+    const ctx = {
+      client: {
+        session: {
+          status: async () => ({ data: { ses_idle_race: { type: "idle" } } }),
+          messages: async () => {
+            await messagesGateOpen
+            return {
+              data: [
+                {
+                  info: {
+                    id: "msg_user_race",
+                    role: "user",
+                    agent: "Sisyphus",
+                    model: { providerID: "anthropic", modelID: "claude-opus-4-7", variant: "max" },
+                  },
+                  parts: [{ type: "text", text: "trigger" }],
+                },
+                {
+                  info: {
+                    id: "msg_assistant_race",
+                    role: "assistant",
+                    sessionID: "ses_idle_race",
+                    finish: "tool-calls",
+                  },
+                  parts: [
+                    {
+                      type: "tool_use",
+                      id: "toolu_race_pending",
+                      callID: "prt_race",
+                      name: "bash",
+                      input: {},
+                      state: { status: "pending" },
+                    },
+                  ],
+                },
+              ],
+            }
+          },
+          promptAsync: async (call: PromptAsyncCall) => {
+            promptAsyncCalls.push(call)
+            return {}
+          },
+        },
+      },
+      directory: "/tmp/session-recovery-race-test",
+    }
+    const hook = createSessionRecoveryHook(ctx as never)
+
+    // when
+    const inFlight = Promise.all([
+      hook.handleInterruptedToolResultsOnIdle("ses_idle_race"),
+      hook.handleInterruptedToolResultsOnIdle("ses_idle_race"),
+      hook.handleInterruptedToolResultsOnIdle("ses_idle_race"),
+    ])
+    messagesCallResolvers.forEach((resolve) => resolve())
+    const [a, b, c] = await inFlight
+
+    // then
+    expect(a).toBe(true)
+    expect(b).toBe(true)
+    expect(c).toBe(true)
+    expect(promptAsyncCalls).toHaveLength(1)
+    expect(promptAsyncCalls[0]?.body.parts.map((part) => part.toolUseId)).toEqual(["toolu_race_pending"])
+  })
+
   test("#given session.messages hangs during idle recovery #when timeout elapses #then idle recovery returns false", async () => {
     // given
     _setInterruptedIdleMessagesFetchTimeoutMsForTesting(5)

@@ -214,6 +214,70 @@ describe("recoverToolResultMissing", () => {
     expect(call.body.parts[0]?.content?.[0]?.text).toBe("Tool execution was interrupted before producing a result.")
   })
 
+  it("does not send a duplicate recovered tool result when a later user message already answered it", async () => {
+    //#given
+    const failedAssistant: MessageData = {
+      info: { id: "msg_failed", role: "assistant" },
+      parts: [{
+        type: "tool_use",
+        id: "toolu_already_answered",
+        state: { status: "running" },
+      }],
+    }
+    const { client, promptAsync } = createMockClient([
+      failedAssistant,
+      {
+        info: { id: "msg_recovery", role: "user" },
+        parts: [{ type: "tool_result", toolUseId: "toolu_already_answered" }],
+      },
+    ])
+
+    //#when
+    const result = await recoverToolResultMissing(client, "ses_1", failedAssistant, undefined, {
+      recoverStatuses: new Set(["pending", "running"]),
+    })
+
+    //#then
+    expect(result).toBe(false)
+    expect(promptAsync).not.toHaveBeenCalled()
+  })
+
+  it("sends only unanswered recovered tool results after a fresh message read", async () => {
+    //#given
+    const failedAssistant: MessageData = {
+      info: { id: "msg_failed", role: "assistant" },
+      parts: [
+        {
+          type: "tool_use",
+          id: "toolu_answered",
+          state: { status: "running" },
+        },
+        {
+          type: "tool_use",
+          id: "toolu_unanswered",
+          state: { status: "running" },
+        },
+      ],
+    }
+    const { client, promptAsyncCalls } = createMockClient([
+      failedAssistant,
+      {
+        info: { id: "msg_recovery", role: "user" },
+        parts: [{ type: "tool_result", tool_use_id: "toolu_answered" }],
+      },
+    ])
+
+    //#when
+    const result = await recoverToolResultMissing(client, "ses_1", failedAssistant, undefined, {
+      recoverStatuses: new Set(["pending", "running"]),
+    })
+
+    //#then
+    expect(result).toBe(true)
+    const call = firstPromptAsyncCall(promptAsyncCalls)
+    expect(call.body.parts.map((part) => part.toolUseId)).toEqual(["toolu_unanswered"])
+  })
+
   it("returns false for stored parts when tool part has no valid callID", async () => {
     //#given
     storedParts = [{ type: "tool", id: "prt_stored_missing_call", tool: "bash", state: { input: {} } }]
