@@ -46,16 +46,48 @@ function hasAssistantCompletionMarker(info: Record<string, unknown>): boolean {
 }
 
 /**
+ * Part types that are purely structural turn scaffolding, NOT model output.
+ * An assistant message emits these (and may open an *empty* reasoning/text
+ * part) before the provider has produced a single token. Treating them as
+ * "progress" disarms the watchdog while the stream is still silent — exactly
+ * how a stalled reasoning block (empty `reasoning` part + `step-start`, then
+ * zero tokens for 30 min) escaped recovery and hung indefinitely.
+ */
+const STRUCTURAL_PART_TYPES = new Set(["step-start", "step-finish"])
+const TEXTUAL_PART_TYPES = new Set(["text", "reasoning"])
+
+function partHasContent(part: Record<string, unknown>): boolean {
+  return typeof part.text === "string" && part.text.trim().length > 0
+}
+
+/**
+ * True only when a part represents *real* model output:
+ *   - tool / tool_use / tool-call / tool_result / file / ...: the model is
+ *     actively doing concrete work, so it is not silent.
+ *   - text / reasoning: ONLY when they carry non-empty content. A freshly
+ *     opened reasoning/text block with no text yet is NOT progress.
+ * Structural markers (step-start/step-finish) never count.
+ */
+function isRealProgressPart(part: unknown): boolean {
+  if (!isRecord(part)) return false
+  const type = typeof part.type === "string" ? part.type : undefined
+  if (!type) return false
+  if (STRUCTURAL_PART_TYPES.has(type)) return false
+  if (TEXTUAL_PART_TYPES.has(type)) return partHasContent(part)
+  return true
+}
+
+/**
  * Translate an OpenCode session event into the appropriate watchdog signal.
  *
- * Progress semantics for cancelling the watchdog:
- *   - assistant `info.error` set: the existing message-update-handler will
- *     deal with the error path; the watchdog has done its job.
+ * Progress semantics for cancelling the watchdog (see isRealProgressPart):
+ *   - assistant `info.error` set: the message-update-handler owns the error
+ *     path; the watchdog has done its job.
  *   - assistant `info.finish` set: the response completed.
- *   - any assistant part with a known type (`text`, `reasoning`, `tool`,
- *     `tool_use`, `tool_result`, `tool-call`, `step-start`, `file`, ...):
- *     the model has started responding. A subagent that immediately runs
- *     tools is *working*, not silent — so any part presence cancels.
+ *   - a real-content part (tool/file activity, or non-empty text/reasoning)
+ *     or a non-empty text delta: the model is genuinely producing output.
+ *   - structural-only parts (step-start) and EMPTY text/reasoning parts do
+ *     NOT count — the stream may still be silently stalled.
  */
 export function observeEventForWatchdog(
   event: { type: string; properties?: unknown },
@@ -72,12 +104,11 @@ export function observeEventForWatchdog(
 
   if (event.type === "message.part.updated" || event.type === "message.part.delta") {
     const sessionID = resolveMessageEventSessionID(props)
+    if (!sessionID) return
     const part = isRecord(props.part) ? props.part : undefined
-    const hasPartType = typeof part?.type === "string"
-    const hasTopLevelType = typeof props.type === "string"
-    const hasTextDelta = props.field === "text" && typeof props.delta === "string"
-    const hasNonEmptySessionPart = typeof part?.sessionID === "string" && Object.keys(part).length > 0
-    if (sessionID && (hasPartType || hasTopLevelType || hasTextDelta || hasNonEmptySessionPart)) {
+    const hasTextDelta =
+      props.field === "text" && typeof props.delta === "string" && props.delta.trim().length > 0
+    if (hasTextDelta || isRealProgressPart(part)) {
       watchdog.onAssistantProgress(sessionID)
     }
     return
@@ -103,8 +134,8 @@ export function observeEventForWatchdog(
       const eventParts = Array.isArray(props.parts) ? props.parts : undefined
       const infoParts = Array.isArray(info?.parts) ? info.parts : undefined
       const parts = eventParts ?? infoParts ?? []
-      const hasAnyPart = parts.some((part) => isRecord(part) && typeof part.type === "string")
-      if (hasError || hasFinish || hasAnyPart) {
+      const hasRealProgress = parts.some((part) => isRealProgressPart(part))
+      if (hasError || hasFinish || hasRealProgress) {
         watchdog.onAssistantProgress(sessionID)
       }
     }

@@ -333,6 +333,36 @@ describe("first-prompt-watchdog", () => {
 
     watchdog.dispose()
   })
+
+  it("#given the assistant only emits step-start + an EMPTY reasoning part (stalled reasoning block) #when the threshold passes #then the watchdog still fires and recovers (regression: Apollo oracle 30-min hang)", async () => {
+    // given
+    const sessionID = "session-empty-reasoning-stall"
+    subagentSessions.add(sessionID)
+    const deps = createDeps()
+    const calls: RecordedCalls = { abort: [], autoRetry: [] }
+    const helpers = createHelpers(calls, AGENT)
+    const watchdog = createFirstPromptWatchdog(deps, helpers, WATCHDOG_MS)
+
+    // when - arm, then emit ONLY structural scaffolding + an empty reasoning block
+    watchdog.onUserMessage(sessionID, PRIMARY_MODEL, AGENT)
+    await wait(SAFE_WAIT_BEFORE_FIRE_MS)
+    observeEventForWatchdog(
+      { type: "message.part.updated", properties: { sessionID, part: { type: "step-start", sessionID } } },
+      watchdog,
+    )
+    observeEventForWatchdog(
+      { type: "message.part.updated", properties: { sessionID, part: { type: "reasoning", text: "", sessionID } } },
+      watchdog,
+    )
+    await wait(SAFE_WAIT_AFTER_FIRE_MS)
+
+    // then - the empty reasoning + step-start did NOT count as progress, so recovery fired
+    expect(calls.abort).toEqual([{ sessionID, source: "first-prompt-watchdog" }])
+    expect(calls.autoRetry).toHaveLength(1)
+    expect(calls.autoRetry[0].newModel).toBe(PRIMARY_MODEL)
+
+    watchdog.dispose()
+  })
 })
 
 interface RecordedWatchdogCalls {
@@ -384,7 +414,6 @@ describe("observeEventForWatchdog", () => {
     ["tool_use", { type: "tool_use", id: "t1", name: "Read" }],
     ["tool_result", { type: "tool_result", tool_use_id: "t1" }],
     ["tool-call", { type: "tool-call" }],
-    ["step-start", { type: "step-start" }],
     ["file", { type: "file" }],
   ]
 
@@ -410,6 +439,48 @@ describe("observeEventForWatchdog", () => {
       createRecordingWatchdog(calls),
     )
     expect(calls.progress).toEqual([sessionID])
+  })
+
+  const nonProgressParts: ReadonlyArray<readonly [string, { readonly type: string; readonly text?: string }]> = [
+    ["step-start", { type: "step-start" }],
+    ["step-finish", { type: "step-finish" }],
+    ["empty reasoning", { type: "reasoning", text: "" }],
+    ["whitespace-only reasoning", { type: "reasoning", text: "   " }],
+    ["empty text", { type: "text", text: "" }],
+    ["reasoning with no text field", { type: "reasoning" }],
+  ]
+
+  it.each(nonProgressParts)("#given a message.updated assistant event whose only part is %s (no real content) #when observed #then NO progress is signalled (stream may still be silent)", (_label: string, part: { readonly type: string; readonly text?: string }) => {
+    const calls = freshCalls()
+    observeEventForWatchdog(
+      {
+        type: "message.updated",
+        properties: { info: { sessionID, role: "assistant" }, parts: [part] },
+      },
+      createRecordingWatchdog(calls),
+    )
+    expect(calls.progress).toEqual([])
+  })
+
+  it.each(nonProgressParts)("#given a message.part.updated event whose part is %s (no real content) #when observed #then NO progress is signalled", (_label: string, part: { readonly type: string; readonly text?: string }) => {
+    const calls = freshCalls()
+    observeEventForWatchdog(
+      {
+        type: "message.part.updated",
+        properties: { sessionID, part },
+      },
+      createRecordingWatchdog(calls),
+    )
+    expect(calls.progress).toEqual([])
+  })
+
+  it("#given a message.part.delta with an empty text delta #when observed #then NO progress is signalled", () => {
+    const calls = freshCalls()
+    observeEventForWatchdog(
+      { type: "message.part.delta", properties: { sessionID, field: "text", delta: "" } },
+      createRecordingWatchdog(calls),
+    )
+    expect(calls.progress).toEqual([])
   })
 
   it("#given a message.updated assistant event with parts: [] and no error/finish #when observed #then no progress is signalled (no activity yet)", () => {
