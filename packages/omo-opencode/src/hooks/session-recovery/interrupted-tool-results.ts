@@ -20,8 +20,9 @@ export function createInterruptedToolResultsHandler(
   callbacks: SessionRecoveryCallbacks,
 ): (sessionID: string) => Promise<boolean> {
   const processingInterruptedToolMessages = new Set<string>()
+  const inFlightRecoveries = new Map<string, Promise<boolean>>()
 
-  return async (sessionID: string): Promise<boolean> => {
+  const runRecovery = async (sessionID: string): Promise<boolean> => {
     let recoveryStarted = false
     let assistantMessageIDForRecovery: string | undefined
     try {
@@ -76,5 +77,17 @@ export function createInterruptedToolResultsHandler(
         callbacks.onRecoveryCompleteCallback(sessionID)
       }
     }
+  }
+
+  return async (sessionID: string): Promise<boolean> => {
+    const inFlight = inFlightRecoveries.get(sessionID)
+    if (inFlight) {
+      return inFlight
+    }
+    const promise = runRecovery(sessionID).finally(() => {
+      inFlightRecoveries.delete(sessionID)
+    })
+    inFlightRecoveries.set(sessionID, promise)
+    return promise
   }
 }

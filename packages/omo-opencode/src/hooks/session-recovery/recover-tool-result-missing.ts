@@ -115,6 +115,38 @@ async function readPartsFromSDKFallback(
       throw error
     }
     return []
+    return []
+  }
+}
+
+
+async function fetchAnsweredToolUseIDs(
+  client: Client,
+  sessionID: string,
+  assistantMessageID: string | undefined,
+): Promise<Set<string>> {
+  if (!assistantMessageID) return new Set()
+  try {
+    const resp = await client.session.messages({ path: { id: sessionID } })
+    const messages = normalizeSDKResponse(resp, [] as MessageData[], { preferResponseOnMissingData: true })
+    const assistantIdx = messages.findIndex((m) => m.info?.id === assistantMessageID)
+    if (assistantIdx === -1) return new Set()
+    const answered = new Set<string>()
+    for (let i = assistantIdx + 1; i < messages.length; i++) {
+      const message = messages[i]
+      if (message?.info?.role !== "user") continue
+      for (const part of message.parts ?? []) {
+        if (part?.type !== "tool_result") continue
+        const candidate = part as { toolUseId?: unknown; tool_use_id?: unknown }
+        const id = typeof candidate.toolUseId === "string" ? candidate.toolUseId
+          : typeof candidate.tool_use_id === "string" ? candidate.tool_use_id
+          : undefined
+        if (id) answered.add(id)
+      }
+    }
+    return answered
+  } catch {
+    return new Set()
   }
 }
 
@@ -141,9 +173,20 @@ export async function recoverToolResultMissing(
   if (toolUseIds.length === 0) {
     return false
   }
+
+  // Defense-in-depth: re-fetch fresh state and filter out call IDs that
+  // already have corresponding tool_result blocks. Catches races where two
+  // recovery paths (idle vs session.error vs concurrent idle events) both
+  // decide to recover the same dangling tool_use parts.
+  const alreadyAnsweredIDs = await fetchAnsweredToolUseIDs(client, sessionID, failedAssistantMsg.info?.id)
+  const remainingToolUseIds = toolUseIds.filter((id) => !alreadyAnsweredIDs.has(id))
+  if (remainingToolUseIds.length === 0) {
+    return false
+  }
+
   const resultText = options?.resultText ?? "Operation cancelled by user (ESC pressed)"
 
-  const toolResultParts = toolUseIds.map((id) => ({
+  const toolResultParts = remainingToolUseIds.map((id) => ({
     type: "tool_result" as const,
     toolUseId: id,
     tool_use_id: id,
