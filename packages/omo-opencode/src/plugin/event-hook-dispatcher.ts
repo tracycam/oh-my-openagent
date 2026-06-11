@@ -55,6 +55,7 @@ export function createEventHookDispatcher(hooks: CreatedHooks, runEventHookSafel
       input,
     );
     await runEventHookSafely("runtimeFallback", hooks.runtimeFallback?.event, input);
+    await runEventHookSafely("contentFilterFallback", hooks.contentFilterFallback?.event, input);
     await runEventHookSafely("agentUsageReminder", hooks.agentUsageReminder?.event, input);
     await runEventHookSafely("categorySkillReminder", hooks.categorySkillReminder?.event, input);
     await runEventHookSafely("interactiveBashSession", hooks.interactiveBashSession?.event, input);

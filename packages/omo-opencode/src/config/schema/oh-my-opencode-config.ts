@@ -9,6 +9,7 @@ import { BrowserAutomationConfigSchema } from "./browser-automation"
 import { CategoriesConfigSchema } from "./categories"
 import { ClaudeCodeConfigSchema } from "./claude-code"
 import { CommentCheckerConfigSchema } from "./comment-checker"
+import { ContentFilterFallbackConfigSchema } from "./content-filter-fallback"
 import { BuiltinCommandNameSchema } from "./commands"
 import { DefaultModeConfigSchema } from "./default-mode"
 import { ExperimentalConfigSchema } from "./experimental"
@@ -73,6 +74,14 @@ export const OhMyOpenCodeConfigSchema = z.object({
    * { "enabled": true, "retry_on_errors": [429, 500, 502, 503, 504], "timeout_seconds": 30 }
    */
   runtime_fallback: z.union([z.boolean(), RuntimeFallbackConfigSchema]).optional(),
+  /**
+   * Single-shot model fallback when a turn finishes with `content-filter`
+   * (default: disabled). Independent of `model_fallback` (permanent chain) and
+   * `runtime_fallback` (error-driven). Retries the filtered turn once on
+   * `fallback_model`, then reverts to the source model on the next turn.
+   * { "enabled": true, "from_model": "opencode/claude-fable-5", "fallback_model": "bailian-token-plan/qwen3.7-max" }
+   */
+  content_filter_fallback: ContentFilterFallbackConfigSchema.optional(),
   background_task: BackgroundTaskConfigSchema.optional(),
   notification: NotificationConfigSchema.optional(),
   model_capabilities: ModelCapabilitiesConfigSchema.optional(),

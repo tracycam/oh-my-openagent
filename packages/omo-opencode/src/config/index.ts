@@ -21,6 +21,7 @@ export type {
   SisyphusConfig,
   SisyphusTasksConfig,
   RuntimeFallbackConfig,
+  ContentFilterFallbackConfig,
   ModelCapabilitiesConfig,
   FallbackModels,
   TeamModeConfig,

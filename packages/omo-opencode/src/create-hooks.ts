@@ -18,6 +18,7 @@ export type DisposableCreatedHooks = {
   claudeCodeHooks?: DisposableHook
   commentChecker?: DisposableHook
   runtimeFallback?: DisposableHook
+  contentFilterFallback?: DisposableHook
   todoContinuationEnforcer?: DisposableHook
   autoSlashCommand?: DisposableHook
   anthropicContextWindowLimitRecovery?: DisposableHook
@@ -27,6 +28,7 @@ export function disposeCreatedHooks(hooks: DisposableCreatedHooks): void {
   hooks.claudeCodeHooks?.dispose?.()
   hooks.commentChecker?.dispose?.()
   hooks.runtimeFallback?.dispose?.()
+  hooks.contentFilterFallback?.dispose?.()
   hooks.todoContinuationEnforcer?.dispose?.()
   hooks.autoSlashCommand?.dispose?.()
   hooks.anthropicContextWindowLimitRecovery?.dispose?.()

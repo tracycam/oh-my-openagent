@@ -11,6 +11,7 @@ export { createDirectoryAgentsInjectorHook } from "./directory-agents-injector";
 export { createDirectoryReadmeInjectorHook } from "./directory-readme-injector";
 export { createEmptyTaskResponseDetectorHook } from "./empty-task-response-detector";
 export { createAnthropicContextWindowLimitRecoveryHook, type AnthropicContextWindowLimitRecoveryOptions } from "./anthropic-context-window-limit-recovery";
+export { createContentFilterFallbackHook, type ContentFilterFallbackHook } from "./content-filter-fallback";
 
 export { createThinkModeHook } from "./think-mode";
 export {

@@ -27,6 +27,7 @@ import {
   createQuestionLabelTruncatorHook,
   createPreemptiveCompactionHook,
   createRuntimeFallbackHook,
+  createContentFilterFallbackHook,
   createLegacyPluginToastHook,
 } from "../../hooks"
 import {
@@ -62,6 +63,7 @@ export type SessionHooks = {
   questionLabelTruncator: ReturnType<typeof createQuestionLabelTruncatorHook> | null
   taskResumeInfo: ReturnType<typeof createTaskResumeInfoHook> | null
   runtimeFallback: ReturnType<typeof createRuntimeFallbackHook> | null
+  contentFilterFallback: ReturnType<typeof createContentFilterFallbackHook> | null
   legacyPluginToast: ReturnType<typeof createLegacyPluginToastHook> | null
 }
 
@@ -225,6 +227,12 @@ export function createSessionHooks(args: {
         }))
     : null
 
+  const contentFilterFallback =
+    pluginConfig.content_filter_fallback?.enabled && isHookEnabled("content-filter-fallback")
+      ? safeHook("content-filter-fallback", () =>
+          createContentFilterFallbackHook(ctx, { pluginConfig }))
+      : null
+
   const legacyPluginToast = isHookEnabled("legacy-plugin-toast")
     ? safeHook("legacy-plugin-toast", () => createLegacyPluginToastHook(ctx))
     : null
@@ -252,6 +260,7 @@ export function createSessionHooks(args: {
     questionLabelTruncator,
     taskResumeInfo,
     runtimeFallback,
+    contentFilterFallback,
     legacyPluginToast,
   }
 }
