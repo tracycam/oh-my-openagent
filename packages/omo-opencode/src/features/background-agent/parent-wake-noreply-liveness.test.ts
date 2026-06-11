@@ -5,6 +5,7 @@ import { BackgroundManager } from "./manager"
 import { ParentWakeNotifier } from "./parent-wake-notifier"
 import { ParentWakePendingQueue } from "./parent-wake-pending-queue"
 import type { BackgroundTask } from "./types"
+import { RETAINED_WAKE_CONTINUATION_TEXT } from "./parent-wake-prompt-dispatch"
 import {
   releaseAllPromptAsyncReservationsForTesting,
   releasePromptAsyncReservation,
@@ -183,7 +184,7 @@ describe("parent wake noReply admission liveness (issues #4874/#5086)", () => {
       // then: exactly one reply-producing resume is dispatched
       expect(promptAsyncCalls).toHaveLength(2)
       expect(promptAsyncCalls[1]?.body.noReply).toBe(false)
-      expect(JSON.stringify(promptAsyncCalls[1]?.body.parts)).toContain("ALL BACKGROUND TASKS COMPLETE")
+      expect(JSON.stringify(promptAsyncCalls[1]?.body.parts)).toContain(RETAINED_WAKE_CONTINUATION_TEXT)
       expect(notifier.getPendingParentWakes().has("parent-1")).toBe(false)
     } finally {
       Date.now = originalDateNow
@@ -422,7 +423,7 @@ describe("BackgroundManager parent wake recent-activity admission liveness", () 
       // then: the parent resumes exactly once with a reply-producing wake
       expect(promptAsyncCalls).toHaveLength(2)
       expect(promptAsyncCalls[1]?.body.noReply).toBe(false)
-      expect(JSON.stringify(promptAsyncCalls[1]?.body.parts)).toContain("ALL BACKGROUND TASKS COMPLETE")
+      expect(JSON.stringify(promptAsyncCalls[1]?.body.parts)).toContain(RETAINED_WAKE_CONTINUATION_TEXT)
       expect(parentWakeNotifier.getPendingParentWakes().has("parent-1")).toBe(false)
     } finally {
       Date.now = originalDateNow

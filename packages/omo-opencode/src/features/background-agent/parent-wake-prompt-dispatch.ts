@@ -26,8 +26,33 @@ type ParentWakePromptDispatchInput = {
   readonly scheduleFlush: (delayMs?: number) => void
 }
 
+/**
+ * Sent instead of the full notification text when this wake was already
+ * admitted into history as a noReply prompt. The full notification body is
+ * the trailing message in the parent transcript at that point; repeating it
+ * would duplicate the entire task list in context (observed: double
+ * [ALL BACKGROUND TASKS COMPLETE] blocks after a noReply admit escape).
+ */
+export const RETAINED_WAKE_CONTINUATION_TEXT =
+  "[The background task notifications above were delivered while you were busy. Review them and respond now - do not wait for another notification.]"
+
+function resolveWakePromptContent(wake: PendingParentWake, forceNoReply: boolean | undefined): string {
+  const admittedContentUnchanged =
+    wake.noReplyAdmittedAt !== undefined
+    && wake.noReplyAdmittedNotificationCount === wake.notifications.length
+  if (forceNoReply !== true && admittedContentUnchanged) {
+    return RETAINED_WAKE_CONTINUATION_TEXT
+  }
+  return wake.notifications.join("\n\n")
+}
+
 export async function sendParentWakePrompt(input: ParentWakePromptDispatchInput): Promise<void> {
-  const notificationContent = input.latestWake.notifications.join("\n\n")
+  const notificationContent = resolveWakePromptContent(input.latestWake, input.forceNoReply)
+  if (notificationContent === RETAINED_WAKE_CONTINUATION_TEXT) {
+    log("[background-agent] Dispatching retained wake as lightweight continuation (full text already admitted):", {
+      sessionID: input.sessionID,
+    })
+  }
   let dispatchStartedAt = Date.now()
   try {
     dispatchStartedAt = Date.now()
@@ -110,6 +135,7 @@ function markRetainedNoReplyAdmission(input: ParentWakePromptDispatchInput, disp
     return
   }
   input.latestWake.noReplyAdmittedAt = dispatchStartedAt
+  input.latestWake.noReplyAdmittedNotificationCount = input.latestWake.notifications.length
   input.scheduleFlush()
 }
 

@@ -59,6 +59,7 @@ export class ParentWakePendingQueue {
       pendingWake.shouldReply = pendingWake.shouldReply || shouldReply
       if (notificationsChanged) {
         delete pendingWake.noReplyAdmittedAt
+        delete pendingWake.noReplyAdmittedNotificationCount
       }
       return
     }
@@ -80,6 +81,7 @@ export class ParentWakePendingQueue {
       pendingWake.shouldReply = pendingWake.shouldReply || latestWake.shouldReply
       pendingWake.promptContext = latestWake.promptContext
       pendingWake.noReplyAdmittedAt ??= latestWake.noReplyAdmittedAt
+      pendingWake.noReplyAdmittedNotificationCount ??= latestWake.noReplyAdmittedNotificationCount
       pendingWake.toolCallDeferralStartedAt ??= latestWake.toolCallDeferralStartedAt
       pendingWake.allowEmptyAssistantTurnRetry ||= latestWake.allowEmptyAssistantTurnRetry
       return

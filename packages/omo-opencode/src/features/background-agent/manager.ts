@@ -80,6 +80,7 @@ import {
 } from "./loop-detector"
 import { ParentWakeNotifier, type ParentWakePromptContext } from "./parent-wake-notifier"
 import type { PendingParentWake } from "./parent-wake-dedupe"
+import { RETAINED_WAKE_CONTINUATION_TEXT } from "./parent-wake-prompt-dispatch"
 import { registerManagerForCleanup, unregisterManagerForCleanup } from "./process-cleanup"
 import { removeTaskToastTracking } from "./remove-task-toast-tracking"
 import {
@@ -1526,9 +1527,11 @@ The fallback retry session is now created and can be inspected directly.
     const candidate = `${this.parentWakeTextDeltaBuffers.get(key) ?? ""}${partInfo.delta}`
     const expectedInternalWakeText = createInternalAgentTextPart(wake.notifications.join("\n\n")).text
     const expectedVisibleInternalWakeText = expectedInternalWakeText.replace(/<\/?system-reminder>/g, "")
+    const expectedRetainedContinuationText = createInternalAgentTextPart(RETAINED_WAKE_CONTINUATION_TEXT).text
     const shouldHold =
       expectedInternalWakeText.startsWith(candidate)
       || expectedVisibleInternalWakeText.startsWith(candidate)
+      || expectedRetainedContinuationText.startsWith(candidate)
       || hasInternalInitiatorMarker(candidate)
     if (shouldHold) {
       this.parentWakeTextDeltaBuffers.set(key, candidate)
