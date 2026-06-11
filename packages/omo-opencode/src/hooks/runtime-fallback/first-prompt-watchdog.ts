@@ -13,6 +13,7 @@ import { dispatchFallbackRetry } from "./fallback-retry-dispatcher"
 
 const SOURCE = "first-prompt-watchdog"
 const SESSION_NEXT_EVENT_PREFIX = "session.next."
+const MAX_SAME_MODEL_WATCHDOG_RETRIES = 2
 
 declare function setTimeout(callback: () => void | Promise<void>, delay?: number): RuntimeFallbackTimeout
 declare function clearTimeout(timeout: RuntimeFallbackTimeout): void
@@ -123,6 +124,7 @@ export function createFirstPromptWatchdog(
 ): FirstPromptWatchdog {
   const timers = new Map<string, RuntimeFallbackTimeout>()
   const armed = new Set<string>()
+  const sameModelRetryAttempts = new Map<string, number>()
 
   const cancel = (sessionID: string): void => {
     const timer = timers.get(sessionID)
@@ -146,11 +148,47 @@ export function createFirstPromptWatchdog(
     const fallbackModels = getFallbackModelsForSession(sessionID, resolvedAgent, deps.pluginConfig)
 
     if (fallbackModels.length === 0) {
-      log(`[${HOOK_NAME}] ${SOURCE}: subagent silent past ${watchdogMs}ms with no fallback configured`, {
+      // No fallback model configured (e.g. plan agent on a fixed model). A
+      // silently-dying stream (finish: "unknown", no error event) would
+      // otherwise go completely unrecovered until the caller's poll timeout.
+      // Degrade to a same-model abort + re-prompt, capped per session.
+      const attempts = sameModelRetryAttempts.get(sessionID) ?? 0
+      if (attempts >= MAX_SAME_MODEL_WATCHDOG_RETRIES) {
+        log(`[${HOOK_NAME}] ${SOURCE}: subagent silent past ${watchdogMs}ms, same-model retries exhausted`, {
+          sessionID,
+          model,
+          agent: resolvedAgent,
+          attempts,
+        })
+        return
+      }
+
+      const retryModel = model ?? resolveFallbackBootstrapModel({
         sessionID,
-        model,
-        agent: resolvedAgent,
+        source: SOURCE,
+        eventModel: model,
+        resolvedAgent,
+        pluginConfig: deps.pluginConfig,
       })
+      if (!retryModel) {
+        log(`[${HOOK_NAME}] ${SOURCE}: subagent silent past ${watchdogMs}ms with no fallback configured and no model info for same-model retry`, {
+          sessionID,
+          agent: resolvedAgent,
+        })
+        return
+      }
+
+      sameModelRetryAttempts.set(sessionID, attempts + 1)
+      log(`[${HOOK_NAME}] ${SOURCE}: subagent silent past ${watchdogMs}ms with no fallback configured, retrying same model`, {
+        sessionID,
+        model: retryModel,
+        agent: resolvedAgent,
+        attempt: attempts + 1,
+        maxAttempts: MAX_SAME_MODEL_WATCHDOG_RETRIES,
+      })
+
+      await helpers.abortSessionRequest(sessionID, SOURCE)
+      await helpers.autoRetryWithFallback(sessionID, retryModel, resolvedAgent, SOURCE)
       return
     }
 
@@ -210,6 +248,7 @@ export function createFirstPromptWatchdog(
     onAssistantProgress(sessionID) {
       if (!sessionID || !armed.has(sessionID)) return
       cancel(sessionID)
+      sameModelRetryAttempts.delete(sessionID)
       log(`[${HOOK_NAME}] ${SOURCE}: cancelled (assistant progress observed)`, { sessionID })
     },
     onSessionTerminal(sessionID) {
@@ -223,6 +262,7 @@ export function createFirstPromptWatchdog(
       }
       timers.clear()
       armed.clear()
+      sameModelRetryAttempts.clear()
     },
   }
 }

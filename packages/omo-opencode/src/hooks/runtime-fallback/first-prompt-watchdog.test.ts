@@ -255,7 +255,7 @@ describe("first-prompt-watchdog", () => {
     watchdog.dispose()
   })
 
-  it("#given a subagent silent past the threshold with no fallback configured #when the watchdog fires #then it logs but does not abort or dispatch (lets the existing error-event paths handle it if one arrives later)", async () => {
+  it("#given a subagent silent past the threshold with no fallback configured #when the watchdog fires #then it aborts and retries with the same model (silent stream death recovery)", async () => {
     // given
     const sessionID = "session-no-fallback"
     subagentSessions.add(sessionID)
@@ -269,8 +269,67 @@ describe("first-prompt-watchdog", () => {
     await wait(SAFE_WAIT_AFTER_FIRE_MS)
 
     // then
-    expect(calls.abort).toEqual([])
-    expect(calls.autoRetry).toEqual([])
+    expect(calls.abort).toEqual([{ sessionID, source: "first-prompt-watchdog" }])
+    expect(calls.autoRetry).toEqual([
+      { sessionID, newModel: PRIMARY_MODEL, resolvedAgent: AGENT, source: "first-prompt-watchdog" },
+    ])
+
+    watchdog.dispose()
+  })
+
+  it("#given same-model retries already exhausted #when the watchdog fires again #then it gives up without aborting or dispatching", async () => {
+    // given
+    const sessionID = "session-no-fallback-exhausted"
+    subagentSessions.add(sessionID)
+    const deps = createDeps()
+    const calls: RecordedCalls = { abort: [], autoRetry: [] }
+    const helpers = createHelpers(calls, AGENT)
+    const watchdog = createFirstPromptWatchdog(deps, helpers, WATCHDOG_MS)
+
+    // when - three consecutive silent fires (re-armed by each retry's user message)
+    watchdog.onUserMessage(sessionID, PRIMARY_MODEL, AGENT)
+    await wait(SAFE_WAIT_AFTER_FIRE_MS)
+    watchdog.onUserMessage(sessionID, PRIMARY_MODEL, AGENT)
+    await wait(SAFE_WAIT_AFTER_FIRE_MS)
+    watchdog.onUserMessage(sessionID, PRIMARY_MODEL, AGENT)
+    await wait(SAFE_WAIT_AFTER_FIRE_MS)
+
+    // then - capped at 2 same-model retries; the third fire gives up
+    expect(calls.autoRetry).toHaveLength(2)
+    expect(calls.abort).toHaveLength(2)
+
+    watchdog.dispose()
+  })
+
+  it("#given assistant progress after a same-model retry #when the model stalls again later #then the retry budget is reset", async () => {
+    // given
+    const sessionID = "session-no-fallback-reset"
+    subagentSessions.add(sessionID)
+    const deps = createDeps()
+    const calls: RecordedCalls = { abort: [], autoRetry: [] }
+    const helpers = createHelpers(calls, AGENT)
+    const watchdog = createFirstPromptWatchdog(deps, helpers, WATCHDOG_MS)
+
+    // when - two silent fires exhaust the budget
+    watchdog.onUserMessage(sessionID, PRIMARY_MODEL, AGENT)
+    await wait(SAFE_WAIT_AFTER_FIRE_MS)
+    watchdog.onUserMessage(sessionID, PRIMARY_MODEL, AGENT)
+    await wait(SAFE_WAIT_AFTER_FIRE_MS)
+    expect(calls.autoRetry).toHaveLength(2)
+
+    // progress observed while armed resets the budget
+    watchdog.onUserMessage(sessionID, PRIMARY_MODEL, AGENT)
+    await wait(SAFE_WAIT_BEFORE_FIRE_MS)
+    watchdog.onAssistantProgress(sessionID)
+    await wait(SAFE_WAIT_AFTER_FIRE_MS)
+    expect(calls.autoRetry).toHaveLength(2)
+
+    // a later silent stall retries again
+    watchdog.onUserMessage(sessionID, PRIMARY_MODEL, AGENT)
+    await wait(SAFE_WAIT_AFTER_FIRE_MS)
+
+    // then
+    expect(calls.autoRetry).toHaveLength(3)
 
     watchdog.dispose()
   })

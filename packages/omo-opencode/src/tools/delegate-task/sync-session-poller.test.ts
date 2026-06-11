@@ -749,4 +749,132 @@ describe("pollSyncSession", () => {
       expect(result).toContain("Poll inactivity timeout reached")
     })
   })
+
+  describe("stalled-turn nudge (silent stream death, finish: unknown)", () => {
+    test("#given idle session whose last assistant turn ended with finish unknown #when grace elapses #then a continuation nudge is dispatched and the nudged turn completes the poll", async () => {
+      const { pollSyncSession } = require("./sync-session-poller")
+
+      let nudged = 0
+      const stalledMessages = [
+        { info: { id: "msg_001", role: "user", time: { created: 1000 } } },
+        {
+          info: { id: "msg_002", role: "assistant", finish: "unknown", time: { created: 2000, completed: 3000 } },
+          parts: [{ type: "text", text: "partial plan output" }],
+        },
+      ]
+      const recoveredMessages = [
+        ...stalledMessages,
+        { info: { id: "msg_003", role: "user", time: { created: 4000 } } },
+        {
+          info: { id: "msg_004", role: "assistant", finish: "stop", time: { created: 5000, completed: 6000 } },
+          parts: [{ type: "text", text: "complete plan output" }],
+        },
+      ]
+
+      const mockClient = {
+        session: {
+          messages: async () => ({ data: nudged > 0 ? recoveredMessages : stalledMessages }),
+          status: async () => ({ data: {} }),
+          abort: async () => ({}),
+        },
+      }
+
+      const result = await pollSyncSession(createMockCtx(), mockClient, {
+        sessionID: "ses_stalled",
+        agentToUse: "plan",
+        toastManager: null,
+        taskId: undefined,
+        stalledTurnNudgeGraceMs: 0,
+        dispatchStalledTurnNudge: async () => {
+          nudged++
+          return true
+        },
+      })
+
+      expect(result).toBeNull()
+      expect(nudged).toBe(1)
+    })
+
+    test("#given a session that stays stalled on the same turn #when nudges are exhausted #then at most 2 nudges are sent and the poll times out", async () => {
+      const { pollSyncSession } = require("./sync-session-poller")
+
+      let nudged = 0
+      const mockClient = {
+        session: {
+          messages: async () => ({
+            data: [
+              { info: { id: "msg_001", role: "user", time: { created: 1000 } } },
+              {
+                info: { id: "msg_002", role: "assistant", finish: "unknown", time: { created: 2000, completed: 3000 } },
+                parts: [{ type: "text", text: "partial output" }],
+              },
+            ],
+          }),
+          status: async () => ({ data: {} }),
+          abort: async () => ({}),
+        },
+      }
+
+      const result = await pollSyncSession(
+        createMockCtx(),
+        mockClient,
+        {
+          sessionID: "ses_stalled_exhausted",
+          agentToUse: "plan",
+          toastManager: null,
+          taskId: undefined,
+          stalledTurnNudgeGraceMs: 0,
+          dispatchStalledTurnNudge: async () => {
+            nudged++
+            return true
+          },
+        },
+        300,
+      )
+
+      expect(nudged).toBe(2)
+      expect(result).toContain("Poll inactivity timeout reached")
+    })
+
+    test("#given the last user message is newer than the unknown-finish assistant turn #when polling #then no nudge is dispatched", async () => {
+      const { pollSyncSession } = require("./sync-session-poller")
+
+      let nudged = 0
+      const mockClient = {
+        session: {
+          messages: async () => ({
+            data: [
+              {
+                info: { id: "msg_001", role: "assistant", finish: "unknown", time: { created: 1000, completed: 2000 } },
+                parts: [{ type: "text", text: "old partial output" }],
+              },
+              { info: { id: "msg_002", role: "user", time: { created: 3000 } } },
+            ],
+          }),
+          status: async () => ({ data: {} }),
+          abort: async () => ({}),
+        },
+      }
+
+      const result = await pollSyncSession(
+        createMockCtx(),
+        mockClient,
+        {
+          sessionID: "ses_not_stalled",
+          agentToUse: "plan",
+          toastManager: null,
+          taskId: undefined,
+          stalledTurnNudgeGraceMs: 0,
+          dispatchStalledTurnNudge: async () => {
+            nudged++
+            return true
+          },
+        },
+        200,
+      )
+
+      expect(nudged).toBe(0)
+      expect(result).toContain("Poll inactivity timeout reached")
+    })
+  })
 })

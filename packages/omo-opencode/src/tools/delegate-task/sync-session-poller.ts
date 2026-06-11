@@ -4,11 +4,17 @@ import { getDefaultSyncPollTimeoutMs, getTimingConfig } from "./timing"
 import { log } from "../../shared/logger"
 import { normalizeSDKResponse } from "../../shared"
 import { extractErrorMessage } from "../../features/background-agent/error-classifier"
+import { dispatchInternalPrompt, isInternalPromptDispatchAccepted } from "../../shared/prompt-async-gate"
+import { createInternalAgentContinuationTextPart } from "../../shared/internal-initiator-marker"
 
 const NON_TERMINAL_FINISH_REASONS = new Set(["tool-calls", "unknown"])
 const PENDING_TOOL_PART_TYPES = new Set(["tool", "tool_use", "tool-call"])
 const ACTIVE_SESSION_STATUSES = new Set(["busy", "retry", "running"])
 const CHILD_WAKE_GRACE_MS = 5_000
+const STALLED_TURN_NUDGE_GRACE_MS = 90_000
+const MAX_STALLED_TURN_NUDGES = 2
+const STALLED_TURN_NUDGE_PROMPT =
+  "Your previous response was interrupted before it finished (the stream ended without a stop reason). Continue from where you stopped and complete the task."
 
 function wait(milliseconds: number): Promise<void> {
   const sharedBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
@@ -73,6 +79,34 @@ export function isSessionComplete(messages: SessionMessage[]): boolean {
 
 const DEFAULT_MAX_ASSISTANT_TURNS = 300
 
+async function dispatchStalledTurnNudgePrompt(client: OpencodeClient, sessionID: string): Promise<boolean> {
+  const result = await dispatchInternalPrompt({
+    mode: "async",
+    client,
+    sessionID,
+    source: "task-stalled-turn-nudge",
+    settleMs: 0,
+    queueBehavior: "defer",
+    // The poll loop has already verified the session is not busy, and the
+    // stalled turn (finish: "unknown") would trip the gate's own tool-state
+    // inspection when the interrupted turn produced no substantive output -
+    // exactly the case that most needs the nudge.
+    checkStatus: false,
+    checkToolState: false,
+    input: {
+      path: { id: sessionID },
+      body: {
+        parts: [createInternalAgentContinuationTextPart(STALLED_TURN_NUDGE_PROMPT)],
+      },
+    },
+  })
+  if (!isInternalPromptDispatchAccepted(result)) {
+    log("[task] Stalled-turn nudge not accepted by prompt gate", { sessionID, status: result.status })
+    return false
+  }
+  return true
+}
+
 export async function pollSyncSession(
   ctx: ToolContextWithMetadata,
   client: OpencodeClient,
@@ -85,6 +119,8 @@ export async function pollSyncSession(
     maxAssistantTurns?: number
     hasActiveChildBackgroundTasks?: (sessionID: string) => boolean
     childWakeGraceMs?: number
+    stalledTurnNudgeGraceMs?: number
+    dispatchStalledTurnNudge?: (sessionID: string) => Promise<boolean>
   },
   timeoutMs?: number
 ): Promise<string | null> {
@@ -100,6 +136,12 @@ export async function pollSyncSession(
   const childWakeGraceMs = input.childWakeGraceMs ?? CHILD_WAKE_GRACE_MS
   let childWaitAssistantId: string | undefined
   let childWaitStartedAt = 0
+  const stalledTurnNudgeGraceMs = input.stalledTurnNudgeGraceMs ?? STALLED_TURN_NUDGE_GRACE_MS
+  const dispatchStalledTurnNudge = input.dispatchStalledTurnNudge
+    ?? ((sessionID: string) => dispatchStalledTurnNudgePrompt(client, sessionID))
+  let stalledAssistantId: string | undefined
+  let stalledSince = 0
+  let stalledNudgeCount = 0
   const shouldWaitForChildTasks = (currentAssistantId: string | undefined): boolean => {
     if (input.hasActiveChildBackgroundTasks?.(input.sessionID)) {
       childWaitAssistantId = currentAssistantId
@@ -226,6 +268,48 @@ export async function pollSyncSession(
         if (input.toastManager && input.taskId) input.toastManager.removeTask(input.taskId)
         return `Task aborted: subagent exceeded ${maxTurns} assistant turns without completing. This usually indicates an infinite tool-call loop. Session ID: ${input.sessionID}`
       }
+    }
+
+    // Silent stream death: the session is idle but the latest assistant turn
+    // ended with finish "unknown" (provider stream died without a stop reason
+    // and without an error event). isSessionComplete will never accept it and
+    // no error-driven recovery fires, so without intervention the poll would
+    // wait out the full inactivity timeout. Nudge the session to continue.
+    const lastUserForStall = [...messages].reverse().find((m) => m.info?.role === "user")
+    const isStalledUnknownTurn =
+      lastAssistant?.info?.id !== undefined
+      && lastAssistant.info.finish === "unknown"
+      && lastUserForStall?.info?.id !== undefined
+      && lastUserForStall.info.id < lastAssistant.info.id
+    if (isStalledUnknownTurn && lastAssistant?.info?.id) {
+      if (stalledAssistantId !== lastAssistant.info.id) {
+        stalledAssistantId = lastAssistant.info.id
+        stalledSince = Date.now()
+      } else if (
+        Date.now() - stalledSince >= stalledTurnNudgeGraceMs
+        && stalledNudgeCount < MAX_STALLED_TURN_NUDGES
+      ) {
+        stalledNudgeCount++
+        log("[task] Stalled turn detected (finish: unknown while idle), dispatching continuation nudge", {
+          sessionID: input.sessionID,
+          assistantID: lastAssistant.info.id,
+          nudge: stalledNudgeCount,
+          maxNudges: MAX_STALLED_TURN_NUDGES,
+        })
+        try {
+          if (await dispatchStalledTurnNudge(input.sessionID)) {
+            inactiveStart = Date.now()
+          }
+        } catch (error) {
+          log("[task] Stalled-turn nudge dispatch failed", {
+            sessionID: input.sessionID,
+            error: String(error),
+          })
+        }
+        stalledSince = Date.now()
+      }
+    } else {
+      stalledAssistantId = undefined
     }
 
     const hasAssistantText = messages.some((m) => {
