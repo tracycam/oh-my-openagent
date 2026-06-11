@@ -141,10 +141,40 @@ export function getParentWakeSessionHistoryDeferralDecision(input: {
     log("[background-agent] Retrying parent wake after stale tool-call deferral:", { sessionID: input.sessionID })
     return { defer: false, skipPromptGateToolStateCheck: true }
   }
+  if (input.wake.noReplyAdmittedAt !== undefined && blockIsCausedByTrailingInternalUserMessages(messages)) {
+    // Deadlock guard: a retained reply-required wake was already admitted as a
+    // noReply prompt. That admit persisted a synthetic user message but, by
+    // design, never starts an assistant turn - so the "synthetic user with no
+    // assistant after it" rule would block re-dispatch forever while the parent
+    // sits idle. When the block is caused solely by our own trailing internal
+    // user messages and the last real assistant turn does not block prompts,
+    // allow the reply-producing dispatch to proceed.
+    delete input.wake.toolCallDeferralStartedAt
+    log("[background-agent] Retrying retained reply-required parent wake after noReply admit left no assistant turn:", {
+      sessionID: input.sessionID,
+    })
+    return { defer: false, skipPromptGateToolStateCheck: true }
+  }
   log("[background-agent] Deferred parent wake because latest assistant turn blocks internal prompts:", {
     sessionID: input.sessionID,
   })
   return { defer: true, skipPromptGateToolStateCheck: false }
+}
+
+function blockIsCausedByTrailingInternalUserMessages(messages: readonly ParentWakeSessionMessage[]): boolean {
+  const trimmed = [...messages]
+  while (trimmed.length > 0) {
+    const last = trimmed[trimmed.length - 1]
+    if (last && getParentWakeMessageRole(last) === "user" && isSyntheticOrInternalUserMessage(last)) {
+      trimmed.pop()
+      continue
+    }
+    break
+  }
+  if (trimmed.length === messages.length) {
+    return false
+  }
+  return !latestAssistantTurnBlocksInternalPrompt([...trimmed])
 }
 
 export function hasRecordedParentWakePromptMessage(input: {
