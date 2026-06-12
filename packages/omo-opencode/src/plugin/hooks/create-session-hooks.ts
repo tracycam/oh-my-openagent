@@ -5,7 +5,6 @@ import type { ModelCacheState } from "../../plugin-state"
 import type { PluginContext } from "../types"
 
 import {
-  createSessionRecoveryHook,
   createSessionNotification,
   createThinkModeHook,
   createModelFallbackHook,
@@ -42,7 +41,6 @@ import { createModelFallbackTitleUpdater } from "./model-fallback-title-updater"
 
 export type SessionHooks = {
   preemptiveCompaction: ReturnType<typeof createPreemptiveCompactionHook> | null
-  sessionRecovery: ReturnType<typeof createSessionRecoveryHook> | null
   sessionNotification: ReturnType<typeof createSessionNotification> | null
   thinkMode: ReturnType<typeof createThinkModeHook> | null
   modelFallback: ReturnType<typeof createModelFallbackHook> | null
@@ -86,11 +84,6 @@ export function createSessionHooks(args: {
       ? safeHook("preemptive-compaction", () =>
           createPreemptiveCompactionHook(ctx, pluginConfig, modelCacheState))
       : null
-
-  const sessionRecovery = isHookEnabled("session-recovery")
-    ? safeHook("session-recovery", () =>
-        createSessionRecoveryHook(ctx, { experimental: pluginConfig.experimental }))
-    : null
 
   let sessionNotification: ReturnType<typeof createSessionNotification> | null = null
   if (isHookEnabled("session-notification")) {
@@ -239,7 +232,6 @@ export function createSessionHooks(args: {
 
   return {
     preemptiveCompaction,
-    sessionRecovery,
     sessionNotification,
     thinkMode,
     modelFallback,

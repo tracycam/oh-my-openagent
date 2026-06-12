@@ -140,6 +140,20 @@ export function createManagers(args: {
 
         log("[create-managers] onSubagentSessionCreated callback completed")
     },
+    onSubagentSessionDeleted: async (event: { sessionID: string }) => {
+      log("[create-managers] onSubagentSessionDeleted callback received", {
+        sessionID: event.sessionID,
+      })
+
+      await tmuxSessionManager.onSessionDeleted(event).catch((error) => {
+        log("[create-managers] onSubagentSessionDeleted callback error:", {
+          sessionID: event.sessionID,
+          error: String(error),
+        })
+      })
+
+      log("[create-managers] onSubagentSessionDeleted callback completed")
+    },
     onShutdown: async () => {
       await cleanupTeamModeRuns().catch((error) => {
         log("[create-managers] team-mode cleanup error during shutdown:", error)
@@ -150,6 +164,13 @@ export function createManagers(args: {
     },
     enableParentSessionNotifications: backgroundNotificationHookEnabled,
     modelFallbackControllerAccessor,
+  })
+
+  // Reconcile persisted background-task snapshots from a previous process so
+  // background_output can reach them after an OpenCode restart. Fire-and-forget:
+  // construction must stay synchronous and a failure must not block init.
+  void backgroundManager.restorePersistedTasks().catch((error) => {
+    log("[create-managers] restorePersistedTasks failed:", error)
   })
 
   deps.initTaskToastManagerFn(ctx.client)
