@@ -161,6 +161,10 @@ class MockBackgroundManager {
     }
 
     if (existingTask.status === "running") {
+      this.resumeCalls.push({ sessionId: input.sessionId, prompt: input.prompt })
+      existingTask.parentSessionId = input.parentSessionId
+      existingTask.parentMessageId = input.parentMessageId
+      existingTask.resumePromptDelivery = "queued"
       return existingTask
     }
 
@@ -1708,7 +1712,7 @@ describe("BackgroundManager.resume", () => {
     expect(result.progress?.toolCalls).toBe(42)
   })
 
-  test("should ignore resume when task is already running", () => {
+  test("should queue prompt delivery when task is already running", () => {
     // given
     const runningTask = createMockTask({
       id: "task-a",
@@ -1721,14 +1725,15 @@ describe("BackgroundManager.resume", () => {
     // when
     const result = manager.resume({
       sessionId: "session-a",
-      prompt: "resume should be ignored",
+      prompt: "mid-turn update",
       parentSessionId: "new-parent",
       parentMessageId: "new-msg",
     })
 
     // then
-    expect(result.parentSessionId).toBe("session-parent")
-    expect(manager.resumeCalls).toHaveLength(0)
+    expect(result.parentSessionId).toBe("new-parent")
+    expect(result.resumePromptDelivery).toBe("queued")
+    expect(manager.resumeCalls).toHaveLength(1)
   })
 })
 
@@ -2866,6 +2871,172 @@ describe("BackgroundManager.resume promptAsync gate state", () => {
     expect(task.concurrencyKey).toBeUndefined()
     expect(getConcurrencyManager(manager).getCount("explore")).toBe(0)
     expect(getPendingByParent(manager).get("parent-session-new")).toBeUndefined()
+
+    manager.shutdown()
+  })
+})
+
+describe("BackgroundManager.resume queued delivery for running task", () => {
+  function createRunningTask(sessionID: string): BackgroundTask {
+    return {
+      id: `task-${sessionID}`,
+      sessionId: sessionID,
+      parentSessionId: "parent-original",
+      parentMessageId: "msg-original",
+      description: "running task",
+      prompt: "original prompt",
+      agent: "explore",
+      status: "running",
+      startedAt: new Date(),
+    }
+  }
+
+  test("queues the prompt while the session is busy and delivers it once the session goes idle", async () => {
+    //#given
+    let sessionBusy = true
+    const promptBodies: Array<Record<string, unknown>> = []
+    const client = {
+      session: {
+        status: async () => ({
+          data: { "session-running-queued": { type: sessionBusy ? "busy" : "idle" } },
+        }),
+        promptAsync: async (input: { body: Record<string, unknown> }) => {
+          promptBodies.push(input.body)
+          return {}
+        },
+        abort: async () => ({}),
+      },
+    }
+    const manager = new BackgroundManager({ pluginContext: createPluginInput(client) })
+    stubNotifyParentSession(manager)
+    const task = createRunningTask("session-running-queued")
+    getTaskMap(manager).set(task.id, task)
+
+    //#when
+    const result = await manager.resume({
+      sessionId: "session-running-queued",
+      prompt: "mid-turn user update",
+      parentSessionId: "parent-new",
+      parentMessageId: "msg-new",
+    })
+
+    //#then - the prompt is queued instead of silently dropped
+    expect(result.resumePromptDelivery).toBe("queued")
+    expect(result.status).toBe("running")
+    expect(result.parentSessionId).toBe("parent-new")
+    expect(result.parentMessageId).toBe("msg-new")
+    expect(promptBodies).toHaveLength(0)
+    expect(getPendingByParent(manager).get("parent-new")?.has(task.id)).toBe(true)
+
+    //#when - the session goes idle and the queue drains
+    sessionBusy = false
+    await waitUntil(() => promptBodies.length > 0, 2000)
+
+    //#then - the queued prompt is delivered with the relayed message
+    expect(promptBodies).toHaveLength(1)
+    const parts = promptBodies[0]?.parts as Array<{ text?: string }> | undefined
+    expect(parts?.[0]?.text).toContain("mid-turn user update")
+
+    manager.shutdown()
+  })
+
+  test("dispatches immediately when the running task's session is already idle", async () => {
+    //#given
+    const promptBodies: Array<Record<string, unknown>> = []
+    const client = {
+      session: {
+        status: async () => ({ data: {} }),
+        promptAsync: async (input: { body: Record<string, unknown> }) => {
+          promptBodies.push(input.body)
+          return {}
+        },
+        abort: async () => ({}),
+      },
+    }
+    const manager = new BackgroundManager({ pluginContext: createPluginInput(client) })
+    stubNotifyParentSession(manager)
+    const task = createRunningTask("session-running-idle")
+    getTaskMap(manager).set(task.id, task)
+
+    //#when
+    const result = await manager.resume({
+      sessionId: "session-running-idle",
+      prompt: "update for idle session",
+      parentSessionId: "parent-new",
+      parentMessageId: "msg-new",
+    })
+
+    //#then
+    expect(result.resumePromptDelivery).toBe("dispatched")
+    expect(result.status).toBe("running")
+    expect(promptBodies).toHaveLength(1)
+
+    manager.shutdown()
+  })
+
+  test("defers completion while a queued resume prompt awaits delivery", async () => {
+    //#given - busy session keeps the resume prompt queued
+    let sessionBusy = true
+    const promptBodies: Array<Record<string, unknown>> = []
+    const client = {
+      session: {
+        status: async () => ({
+          data: { "session-defer-completion": { type: sessionBusy ? "busy" : "idle" } },
+        }),
+        promptAsync: async (input: { body: Record<string, unknown> }) => {
+          promptBodies.push(input.body)
+          return {}
+        },
+        abort: async () => ({}),
+      },
+    }
+    const manager = new BackgroundManager({ pluginContext: createPluginInput(client) })
+    stubNotifyParentSession(manager)
+    const task = createRunningTask("session-defer-completion")
+    getTaskMap(manager).set(task.id, task)
+    await manager.resume({
+      sessionId: "session-defer-completion",
+      prompt: "queued mid-turn update",
+      parentSessionId: "parent-new",
+      parentMessageId: "msg-new",
+    })
+
+    //#when - completion is attempted while the prompt is still queued
+    const completedWhileQueued = await tryCompleteTaskForTest(manager, task)
+
+    //#then - completion is deferred so the message is not lost
+    expect(completedWhileQueued).toBe(false)
+    expect(task.status).toBe("running")
+
+    //#when - the prompt is delivered and completion is attempted again
+    sessionBusy = false
+    await waitUntil(() => promptBodies.length > 0, 2000)
+    const completedAfterDelivery = await tryCompleteTaskForTest(manager, task)
+
+    //#then
+    expect(completedAfterDelivery).toBe(true)
+    expect(task.status).toBe("completed")
+
+    manager.shutdown()
+  })
+
+  test("rejects when promptAsync is unavailable for a running task", async () => {
+    //#given
+    const client = { session: { abort: async () => ({}) } }
+    const manager = new BackgroundManager({ pluginContext: createPluginInput(client) })
+    const task = createRunningTask("session-running-unavailable")
+    getTaskMap(manager).set(task.id, task)
+
+    //#when / #then
+    await expectRejectsWithMessage(
+      manager.resume({
+        sessionId: "session-running-unavailable",
+        prompt: "update",
+        parentSessionId: "parent-new",
+        parentMessageId: "msg-new",
+      }),
+      "promptAsync unavailable",
+    )
 
     manager.shutdown()
   })

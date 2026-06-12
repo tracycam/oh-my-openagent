@@ -48,6 +48,8 @@ export {
   _setPromptGateMessagesFetchTimeoutMsForTesting,
 } from "./prompt-async-gate/timing"
 
+export { getQueuedPromptBlocker } from "./prompt-async-gate/queue"
+
 export type {
   InternalPromptDispatchArgs,
   InternalPromptDispatchMode,

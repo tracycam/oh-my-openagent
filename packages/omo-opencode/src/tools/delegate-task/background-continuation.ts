@@ -58,6 +58,31 @@ export async function executeBackgroundContinuation(
     }
     await publishToolMetadata(ctx, bgContMeta)
 
+    const metadataBlock = buildTaskMetadataBlock({
+      sessionId,
+      backgroundTaskId,
+      agent: task.agent,
+      category: task.category,
+    })
+
+    if (task.resumePromptDelivery === "queued") {
+      return `Message queued for delivery.
+
+Background Task ID: ${backgroundTaskId}
+Description: ${task.description}
+Agent: ${task.agent}
+Status: ${task.status} (mid-turn)
+
+The subagent is currently mid-turn, so the message could not be injected immediately.
+It has been queued and will be delivered as soon as the current turn finishes.
+The task will not complete before processing this message.
+System notifies on completion. Use \`background_output\` with task_id="${backgroundTaskId}" to check.
+
+Do NOT call background_output now. Wait for <system-reminder> notification first.
+
+${metadataBlock}`
+    }
+
     return `Background task continued.
 
 Background Task ID: ${backgroundTaskId}
@@ -70,12 +95,7 @@ System notifies on completion. Use \`background_output\` with task_id="${backgro
 
 Do NOT call background_output now. Wait for <system-reminder> notification first.
 
-${buildTaskMetadataBlock({
-      sessionId,
-      backgroundTaskId,
-      agent: task.agent,
-      category: task.category,
-    })}`
+${metadataBlock}`
   } catch (error) {
     return formatDetailedError(error, {
       operation: "Continue background task",

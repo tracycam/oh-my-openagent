@@ -95,4 +95,51 @@ describe("executeBackgroundContinuation - subagent metadata", () => {
     expect(result).toContain("session_id: ses_resumed_456")
     expect(result).not.toContain("subagent:")
   })
+
+  test("reports queued delivery when the task was mid-turn", async () => {
+    //#given - mock manager.resume returning a running task with queued prompt delivery
+    const mockManager = {
+      resume: async () => ({
+        id: "bg_task_003",
+        description: "round-2 training",
+        agent: "sisyphus-junior",
+        status: "running",
+        sessionId: "ses_resumed_789",
+        resumePromptDelivery: "queued",
+      }),
+    }
+
+    const mockCtx = {
+      sessionID: "parent-session",
+      callID: "call-queued",
+      metadata: mock(() => Promise.resolve()),
+    }
+
+    const mockExecutorCtx = { manager: mockManager }
+
+    const parentContext = {
+      sessionID: "parent-session",
+      messageID: "msg-parent",
+      agent: "sisyphus",
+    }
+
+    const args = {
+      task_id: "ses_resumed_789",
+      prompt: "relay proxy config",
+      description: "relay update",
+      load_skills: [],
+      run_in_background: true,
+    }
+
+    //#when - continuation hits a task that is still mid-turn
+    const { executeBackgroundContinuation } = require("./background-continuation")
+    const result = await executeBackgroundContinuation(args, mockCtx, mockExecutorCtx, parentContext)
+
+    //#then - the tool reports queued delivery instead of claiming the agent already received it
+    expect(result).toContain("Message queued for delivery.")
+    expect(result).toContain("Status: running (mid-turn)")
+    expect(result).not.toContain("Agent continues with full previous context preserved.")
+    expect(result).toContain("<task_metadata>")
+    expect(result).toContain("background_task_id: bg_task_003")
+  })
 })

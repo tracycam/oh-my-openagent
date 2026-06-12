@@ -99,6 +99,8 @@ export interface BackgroundTask {
   stablePolls?: number
   /** Number of consecutive polls where session was missing from status map */
   consecutiveMissedPolls?: number
+  /** Delivery state of the most recent resume prompt ("queued" = task was mid-turn, prompt enqueued for delivery on idle) */
+  resumePromptDelivery?: "scheduled" | "queued" | "dispatched"
 }
 
 export interface LaunchInput {

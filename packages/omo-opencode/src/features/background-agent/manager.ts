@@ -5,6 +5,7 @@ import { setContinuationMarkerSource } from "../../features/run-continuation-sta
 import type { ModelFallbackControllerAccessor } from "../../hooks/model-fallback"
 import {
   dispatchInternalPrompt,
+  getQueuedPromptBlocker,
   type PromptAsyncGateResult,
 } from "../../hooks/shared/prompt-async-gate"
 import { isSessionActive as isOpenCodeSessionActive } from "../../hooks/shared/session-idle-settle"
@@ -220,6 +221,8 @@ export type OnSubagentSessionCreated = (event: SubagentSessionCreatedEvent) => P
 const MAX_TASK_REMOVAL_RESCHEDULES = 6
 const MAX_COMPLETED_TASK_ARCHIVE_SIZE = 100
 const PARENT_WAKE_FAILURE_REQUEUE_WINDOW_MS = 5_000
+/** Gate source for resume prompts enqueued while the task is still mid-turn */
+const RESUME_QUEUED_PROMPT_SOURCE = "background-agent-resume-queued"
 
 export interface BackgroundManagerConfig {
   pluginContext: PluginInput
@@ -1240,6 +1243,116 @@ The fallback retry session is now created and can be inspected directly.
     return task
   }
 
+  /**
+   * Builds the promptAsync input shared by both resume delivery paths.
+   * Applies session prompt params and tool restrictions as a side effect.
+   */
+  private buildResumePromptInput(task: BackgroundTask, sessionID: string, prompt: string) {
+    // Resume uses the same PromptInput contract as launch: model IDs plus top-level variant.
+    const resumeModel = task.model
+      ? {
+          providerID: task.model.providerID,
+          modelID: task.model.modelID,
+        }
+      : undefined
+    const resumeVariant = task.model?.variant
+
+    if (task.model) {
+      applySessionPromptParams(sessionID, task.model)
+    }
+
+    const tools = {
+      task: false,
+      call_omo_agent: true,
+      question: false,
+      ...getAgentToolRestrictions(task.agent, {
+        includeTeamToolDenylist: task.teamRunId === undefined,
+      }),
+    }
+    setSessionTools(sessionID, tools)
+
+    return {
+      path: { id: sessionID },
+      body: {
+        agent: task.agent,
+        ...(resumeModel ? { model: resumeModel } : {}),
+        ...(resumeVariant ? { variant: resumeVariant } : {}),
+        tools,
+        parts: [createInternalAgentTextPart(prompt)],
+      },
+      query: { directory: this.directory },
+    }
+  }
+
+  /**
+   * Delivers a resume prompt to a task that is still mid-turn by enqueueing it
+   * through the prompt gate. The queue retries until the session goes idle, then
+   * dispatches. tryCompleteTask defers completion while the prompt is pending so
+   * the task lifecycle keeps tracking the delivered turn.
+   */
+  private async queueResumePromptForRunningTask(
+    task: BackgroundTask,
+    sessionID: string,
+    input: ResumeInput,
+  ): Promise<BackgroundTask> {
+    log("[background-agent] Resume while task is running - queueing prompt for delivery:", {
+      taskId: task.id,
+      sessionID,
+      promptLength: input.prompt.length,
+    })
+
+    this.updateTaskParent(task, input.parentSessionId)
+    task.parentMessageId = input.parentMessageId
+    task.parentModel = input.parentModel
+    task.parentAgent = input.parentAgent
+    if (input.parentTools) {
+      task.parentTools = input.parentTools
+    }
+
+    if (input.parentSessionId) {
+      const pending = this.pendingByParent.get(input.parentSessionId) ?? new Set()
+      pending.add(task.id)
+      this.pendingByParent.set(input.parentSessionId, pending)
+    }
+
+    const promptResult = await dispatchInternalPrompt({
+      mode: "async",
+      client: this.client,
+      sessionID,
+      source: RESUME_QUEUED_PROMPT_SOURCE,
+      settleMs: 0,
+      queueBehavior: "enqueue",
+      input: this.buildResumePromptInput(task, sessionID, input.prompt),
+    })
+
+    if (promptResult.status === "failed") {
+      if (isAmbiguousPostDispatchPromptFailure(promptResult)) {
+        log("[background-agent] queued resume prompt may have been accepted before ambiguous failure; continuing to poll", {
+          taskId: task.id,
+          sessionID,
+          error: promptResult.error instanceof Error ? promptResult.error.message : String(promptResult.error),
+        })
+        task.resumePromptDelivery = "dispatched"
+        return task
+      }
+      throw promptResult.error instanceof Error
+        ? promptResult.error
+        : new Error(String(promptResult.error))
+    }
+    if (promptResult.status === "unavailable") {
+      throw new Error("promptAsync unavailable - cannot deliver message to running task")
+    }
+
+    task.resumePromptDelivery = promptResult.status === "dispatched" ? "dispatched" : "queued"
+    log("[background-agent] Resume prompt delivery for running task:", {
+      taskId: task.id,
+      sessionID,
+      delivery: task.resumePromptDelivery,
+    })
+    this.startPolling()
+    return task
+  }
+
   async resume(input: ResumeInput): Promise<BackgroundTask> {
     const existingTask = this.findBySession(input.sessionId)
     if (!existingTask) {
@@ -1251,11 +1364,7 @@ The fallback retry session is now created and can be inspected directly.
     }
 
     if (existingTask.status === "running") {
-      log("[background-agent] Resume skipped - task already running:", {
-        taskId: existingTask.id,
-        sessionID: existingTask.sessionId,
-      })
-      return existingTask
+      return this.queueResumePromptForRunningTask(existingTask, existingTask.sessionId, input)
     }
 
     const resumeSnapshot = this.captureResumeTaskSnapshot(existingTask)
@@ -1277,6 +1386,7 @@ The fallback retry session is now created and can be inspected directly.
     existingTask.status = "running"
     existingTask.completedAt = undefined
     existingTask.error = undefined
+    existingTask.resumePromptDelivery = "scheduled"
     this.updateTaskParent(existingTask, input.parentSessionId)
     existingTask.parentMessageId = input.parentMessageId
     existingTask.parentModel = input.parentModel
@@ -1326,18 +1436,6 @@ The fallback retry session is now created and can be inspected directly.
     })
 
     // Fire-and-forget prompt via promptAsync (no response body needed)
-    // Resume uses the same PromptInput contract as launch: model IDs plus top-level variant.
-    const resumeModel = existingTask.model
-      ? {
-          providerID: existingTask.model.providerID,
-          modelID: existingTask.model.modelID,
-        }
-      : undefined
-    const resumeVariant = existingTask.model?.variant
-
-    if (existingTask.model) {
-      applySessionPromptParams(existingTask.sessionId!, existingTask.model)
-    }
 
     dispatchInternalPrompt({
       mode: "async",
@@ -1346,28 +1444,7 @@ The fallback retry session is now created and can be inspected directly.
       source: "background-agent-resume",
       settleMs: 0,
       queueBehavior: "defer",
-      input: {
-        path: { id: existingTask.sessionId },
-        body: {
-          agent: existingTask.agent,
-          ...(resumeModel ? { model: resumeModel } : {}),
-          ...(resumeVariant ? { variant: resumeVariant } : {}),
-          tools: (() => {
-            const tools = {
-              task: false,
-              call_omo_agent: true,
-              question: false,
-              ...getAgentToolRestrictions(existingTask.agent, {
-                includeTeamToolDenylist: existingTask.teamRunId === undefined,
-              }),
-            }
-            setSessionTools(existingTask.sessionId!, tools)
-            return tools
-          })(),
-          parts: [createInternalAgentTextPart(input.prompt)],
-        },
-        query: { directory: this.directory },
-      },
+      input: this.buildResumePromptInput(existingTask, existingTask.sessionId, input.prompt),
     }).then((promptResult) => {
       if (promptResult.status === "failed") {
         if (isAmbiguousPostDispatchPromptFailure(promptResult)) {
@@ -2481,6 +2558,19 @@ The task was re-queued on a fallback model after a retryable failure.
     // Guard: Check if task is still running (could have been completed by another path)
     if (task.status !== "running") {
       log("[background-agent] Task already completed, skipping:", { taskId: task.id, status: task.status, source })
+      return false
+    }
+
+    // Guard: A resume prompt queued while the task was mid-turn is still awaiting
+    // delivery. Defer completion so the prompt dispatches into a live session and
+    // the resulting turn is tracked to completion. Polling re-attempts every cycle;
+    // the blocker clears once the queued prompt dispatches or fails.
+    if (task.sessionId && getQueuedPromptBlocker(task.sessionId) === RESUME_QUEUED_PROMPT_SOURCE) {
+      log("[background-agent] Completion deferred - queued resume prompt awaiting delivery:", {
+        taskId: task.id,
+        sessionID: task.sessionId,
+        source,
+      })
       return false
     }
 
