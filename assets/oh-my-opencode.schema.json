@@ -6105,6 +6105,24 @@
         }
       ]
     },
+    "content_filter_fallback": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "from_model": {
+          "type": "string"
+        },
+        "fallback_model": {
+          "type": "string"
+        },
+        "notify_on_fallback": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "background_task": {
       "type": "object",
       "properties": {

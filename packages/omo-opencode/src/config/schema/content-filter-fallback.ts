@@ -18,12 +18,12 @@ export const ContentFilterFallbackConfigSchema = z.object({
   /**
    * Canonical source model id (`providerID/modelID`) whose `content-filter`
    * finishes trigger the fallback. Only turns produced by this model are
-   * eligible (e.g. "opencode/claude-fable-5").
+   * eligible.
    */
   from_model: z.string().optional(),
   /**
    * Canonical fallback model id (`providerID/modelID`) used for the single
-   * retry of the filtered turn (e.g. "bailian-token-plan/qwen3.7-max"). This
+   * retry of the filtered turn. This
    * model is authoritative for the retry; the source agent's variant/reasoning
    * settings are NOT inherited.
    */
