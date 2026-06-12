@@ -60,6 +60,15 @@ export class ParentWakePendingQueue {
       if (notificationsChanged) {
         delete pendingWake.noReplyAdmittedAt
         delete pendingWake.noReplyAdmittedNotificationCount
+        // A force-queued gate entry holds the OLD notification
+        // snapshot. New content must be free to dispatch, so clear the
+        // force-queued marker AND rotate the force-queue token so any stale
+        // onDispatched/onExpiredOrFailed callback from the old entry no-ops
+        // (token identity binding). The stale gate entry may still deliver, but
+        // semantic-dedupe plus the superseding (now-merged) wake make any
+        // residual duplicate tolerable.
+        delete pendingWake.forcedQueuedAt
+        delete pendingWake.forceQueueToken
       }
       return
     }
@@ -84,6 +93,10 @@ export class ParentWakePendingQueue {
       pendingWake.noReplyAdmittedNotificationCount ??= latestWake.noReplyAdmittedNotificationCount
       pendingWake.toolCallDeferralStartedAt ??= latestWake.toolCallDeferralStartedAt
       pendingWake.allowEmptyAssistantTurnRetry ||= latestWake.allowEmptyAssistantTurnRetry
+      pendingWake.firstDeferredAt ??= latestWake.firstDeferredAt
+      pendingWake.deferCount ??= latestWake.deferCount
+      pendingWake.forcedQueuedAt ??= latestWake.forcedQueuedAt
+      pendingWake.forceQueueToken ??= latestWake.forceQueueToken
       return
     }
     this.pendingParentWakes.set(sessionID, cloneParentWake(latestWake))

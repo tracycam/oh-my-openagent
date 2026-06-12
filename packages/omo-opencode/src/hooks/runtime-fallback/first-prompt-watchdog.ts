@@ -191,6 +191,7 @@ export function createFirstPromptWatchdog(
           agent: resolvedAgent,
           attempts,
         })
+        await deps.onWatchdogExhausted?.(sessionID, { model, agent: resolvedAgent })
         return
       }
 
@@ -206,6 +207,7 @@ export function createFirstPromptWatchdog(
           sessionID,
           agent: resolvedAgent,
         })
+        await deps.onWatchdogExhausted?.(sessionID, { model, agent: resolvedAgent })
         return
       }
 

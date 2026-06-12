@@ -217,6 +217,8 @@ export function createSessionHooks(args: {
         createRuntimeFallbackHook(ctx, {
           config: runtimeFallbackConfig,
           pluginConfig,
+          onWatchdogExhausted: (sessionID, info) =>
+            backgroundManager.failWatchdogExhaustedTask(sessionID, info),
         }))
     : null
 
