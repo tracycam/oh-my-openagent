@@ -128,6 +128,38 @@ describe("createContentFilterFallbackHook", () => {
     expect(captured.prompts).toHaveLength(1)
   })
 
+  test("#given the source model as FLAT providerID/modelID with no info.model (real opencode shape) #when content-filter fires #then it still triggers", async () => {
+    const captured = { prompts: [] as CapturedPrompt[], toasts: [] as CapturedToast[] }
+    const hook = createContentFilterFallbackHook(createCtx(captured), { pluginConfig: config() })
+    const sessionID = nextSession()
+
+    // Built manually (not via messageUpdated, which always injects info.model):
+    // this is exactly what the opencode provider persists for a content-filter
+    // finish - flat providerID + modelID, NO info.model object.
+    await hook.event({
+      event: {
+        type: "message.updated",
+        properties: {
+          sessionID,
+          info: {
+            sessionID,
+            id: "msg_asst_1",
+            role: "assistant",
+            finish: "content-filter",
+            providerID: "opencode",
+            modelID: "claude-fable-5",
+          },
+        },
+      },
+    })
+
+    expect(captured.prompts).toHaveLength(1)
+    expect(captured.prompts[0]?.body?.model).toEqual({
+      providerID: "bailian-token-plan",
+      modelID: "qwen3.7-max",
+    })
+  })
+
   test("#given a non-content-filter finish #when the event fires #then nothing is dispatched", async () => {
     const captured = { prompts: [] as CapturedPrompt[], toasts: [] as CapturedToast[] }
     const hook = createContentFilterFallbackHook(createCtx(captured), { pluginConfig: config() })
