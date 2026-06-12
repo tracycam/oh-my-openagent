@@ -877,4 +877,177 @@ describe("pollSyncSession", () => {
       expect(result).toContain("Poll inactivity timeout reached")
     })
   })
+
+  describe("mid-turn stall (live stream death while busy)", () => {
+    test("#given a busy session whose latest assistant turn opened an empty reasoning part that never advances #when the mid-turn grace elapses #then the turn is aborted with a retryable result and the idle nudge path is NOT used", async () => {
+      const { pollSyncSession } = require("./sync-session-poller")
+      let aborted = 0
+      let nudged = 0
+      const mockClient = {
+        session: {
+          messages: async () => ({
+            data: [
+              { info: { id: "msg_001", role: "user", time: { created: 1000 } } },
+              { info: { id: "msg_002", role: "assistant", time: { created: 2000 } }, parts: [{ type: "reasoning", id: "p1", text: "" }] },
+            ],
+          }),
+          status: async () => ({ data: { ses_frozen: { type: "busy" } } }),
+          abort: async () => { aborted++ },
+        },
+      }
+
+      const result = await pollSyncSession(createMockCtx(), mockClient, {
+        sessionID: "ses_frozen",
+        agentToUse: "oracle",
+        toastManager: { removeTask: () => {} },
+        taskId: "task_x",
+        midTurnStallGraceMs: 0,
+        dispatchStalledTurnNudge: async () => { nudged++; return true },
+      }, 5000)
+
+      expect(result).toContain("stalled mid-turn")
+      expect(result).toContain("retryable")
+      expect(result).toContain("ses_frozen")
+      expect(aborted).toBe(1)
+      expect(nudged).toBe(0)
+    })
+
+    test("#given a busy session whose reasoning part keeps growing #when polled #then it is never mid-turn aborted and completes normally once idle", async () => {
+      const { pollSyncSession } = require("./sync-session-poller")
+      let polls = 0
+      let aborted = 0
+      const mockClient = {
+        session: {
+          status: async () => {
+            polls++
+            return { data: { ses_grow: { type: polls < 4 ? "busy" : "idle" } } }
+          },
+          messages: async () => ({
+            data: [
+              { info: { id: "msg_001", role: "user", time: { created: 1000 } } },
+              polls < 4
+                ? { info: { id: "msg_002", role: "assistant", time: { created: 2000 } }, parts: [{ type: "reasoning", id: "p1", text: "x".repeat(polls * 50) }] }
+                : { info: { id: "msg_002", role: "assistant", time: { created: 2000 }, finish: "stop" }, parts: [{ type: "text", text: "done" }] },
+            ],
+          }),
+          abort: async () => { aborted++ },
+        },
+      }
+
+      const result = await pollSyncSession(createMockCtx(), mockClient, {
+        sessionID: "ses_grow",
+        agentToUse: "oracle",
+        toastManager: null,
+        taskId: undefined,
+        midTurnStallGraceMs: 0,
+      }, 5000)
+
+      expect(result).toBeNull()
+      expect(aborted).toBe(0)
+    })
+
+    test("#given a busy session whose latest assistant turn announced a tool that stays pending #when the grace elapses #then the turn is aborted as retryable", async () => {
+      const { pollSyncSession } = require("./sync-session-poller")
+      let aborted = 0
+      const mockClient = {
+        session: {
+          messages: async () => ({
+            data: [
+              { info: { id: "msg_001", role: "user", time: { created: 1000 } } },
+              { info: { id: "msg_002", role: "assistant", time: { created: 2000 } }, parts: [{ type: "tool", id: "t1", callID: "c1", state: { status: "pending" } }] },
+            ],
+          }),
+          status: async () => ({ data: { ses_tool_pending: { type: "busy" } } }),
+          abort: async () => { aborted++ },
+        },
+      }
+
+      const result = await pollSyncSession(createMockCtx(), mockClient, {
+        sessionID: "ses_tool_pending",
+        agentToUse: "Sisyphus-Junior",
+        toastManager: null,
+        taskId: undefined,
+        midTurnStallGraceMs: 0,
+      }, 5000)
+
+      expect(result).toContain("stalled mid-turn")
+      expect(aborted).toBe(1)
+    })
+
+    test("#given a busy session whose latest assistant turn has a tool actively running #when the grace elapses #then it is NOT mid-turn aborted (tool-level timeout owns it) and completes once idle", async () => {
+      const { pollSyncSession } = require("./sync-session-poller")
+      let polls = 0
+      let aborted = 0
+      const mockClient = {
+        session: {
+          status: async () => {
+            polls++
+            return { data: { ses_tool_running: { type: polls < 4 ? "busy" : "idle" } } }
+          },
+          messages: async () => ({
+            data: polls < 4
+              ? [
+                  { info: { id: "msg_001", role: "user", time: { created: 1000 } } },
+                  { info: { id: "msg_002", role: "assistant", time: { created: 2000 } }, parts: [{ type: "tool", id: "t1", callID: "c1", state: { status: "running" } }] },
+                ]
+              : [
+                  { info: { id: "msg_001", role: "user", time: { created: 1000 } } },
+                  { info: { id: "msg_002", role: "assistant", time: { created: 2000 }, finish: "tool-calls" }, parts: [{ type: "tool", id: "t1", callID: "c1", state: { status: "running" } }] },
+                  { info: { id: "msg_003", role: "user", time: { created: 3000 } } },
+                  { info: { id: "msg_004", role: "assistant", time: { created: 4000 }, finish: "stop" }, parts: [{ type: "text", text: "done" }] },
+                ],
+          }),
+          abort: async () => { aborted++ },
+        },
+      }
+
+      const result = await pollSyncSession(createMockCtx(), mockClient, {
+        sessionID: "ses_tool_running",
+        agentToUse: "Sisyphus-Junior",
+        toastManager: null,
+        taskId: undefined,
+        midTurnStallGraceMs: 0,
+      }, 5000)
+
+      expect(result).toBeNull()
+      expect(aborted).toBe(0)
+    })
+
+    test("#given a busy session whose assistant turn has not emitted any part yet (time-to-first-token) #when polled at zero grace #then it is NOT aborted", async () => {
+      const { pollSyncSession } = require("./sync-session-poller")
+      let polls = 0
+      let aborted = 0
+      const mockClient = {
+        session: {
+          status: async () => {
+            polls++
+            return { data: { ses_ttft: { type: polls < 4 ? "busy" : "idle" } } }
+          },
+          messages: async () => ({
+            data: polls < 4
+              ? [
+                  { info: { id: "msg_001", role: "user", time: { created: 1000 } } },
+                  { info: { id: "msg_002", role: "assistant", time: { created: 2000 } }, parts: [] },
+                ]
+              : [
+                  { info: { id: "msg_001", role: "user", time: { created: 1000 } } },
+                  { info: { id: "msg_002", role: "assistant", time: { created: 2000 }, finish: "stop" }, parts: [{ type: "text", text: "done" }] },
+                ],
+          }),
+          abort: async () => { aborted++ },
+        },
+      }
+
+      const result = await pollSyncSession(createMockCtx(), mockClient, {
+        sessionID: "ses_ttft",
+        agentToUse: "oracle",
+        toastManager: null,
+        taskId: undefined,
+        midTurnStallGraceMs: 0,
+      }, 5000)
+
+      expect(result).toBeNull()
+      expect(aborted).toBe(0)
+    })
+  })
 })

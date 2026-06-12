@@ -122,7 +122,9 @@ describe("syncPollTimeoutMs threading", () => {
           expect(result).toBeNull()
           expect(abortCount).toBe(0)
           expect(statusCallCount).toBe(3)
-          expect(messageCallCount).toBe(1)
+          // Mid-turn stall detection fetches messages on every active poll
+          // (busy, retry) plus the final idle poll, to observe stream progress.
+          expect(messageCallCount).toBe(3)
         })
       })
     })

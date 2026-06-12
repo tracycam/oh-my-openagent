@@ -38,5 +38,5 @@ export interface SessionMessage {
     providerID?: string
     variant?: string
   }
-  parts?: Array<{ type?: string; text?: string }>
+  parts?: Array<{ type?: string; text?: string; id?: string; callID?: string; state?: { status?: string } }>
 }

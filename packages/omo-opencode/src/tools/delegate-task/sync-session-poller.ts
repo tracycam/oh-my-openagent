@@ -13,6 +13,8 @@ const ACTIVE_SESSION_STATUSES = new Set(["busy", "retry", "running"])
 const CHILD_WAKE_GRACE_MS = 5_000
 const STALLED_TURN_NUDGE_GRACE_MS = 90_000
 const MAX_STALLED_TURN_NUDGES = 2
+const MID_TURN_STALL_GRACE_MS = 180_000
+const RUNNING_TOOL_STATUS = "running"
 const STALLED_TURN_NUDGE_PROMPT =
   "Your previous response was interrupted before it finished (the stream ended without a stop reason). Continue from where you stopped and complete the task."
 
@@ -34,6 +36,42 @@ function abortSyncSession(client: OpencodeClient, sessionID: string, reason: str
 
 function isActiveSessionStatus(status: { type: string } | undefined): boolean {
   return status !== undefined && ACTIVE_SESSION_STATUSES.has(status.type)
+}
+
+// Fingerprint of the in-progress assistant turn's latest content. It advances
+// when the stream emits a new part, grows reasoning/text, or moves a tool's
+// state forward. Returns undefined when there is no in-progress assistant part
+// yet (time-to-first-token latency) or the latest turn is not assistant-led, so
+// callers never treat pre-stream latency as a stall. The part-index fallback
+// disambiguates two distinct empty parts that lack ids.
+function computeMidTurnFingerprint(assistant: SessionMessage | undefined): string | undefined {
+  if (!assistant || assistant.info?.role !== "assistant") return undefined
+  const parts = assistant.parts ?? []
+  if (parts.length === 0) return undefined
+  const lastIndex = parts.length - 1
+  const last = parts[lastIndex]
+  const partKey = [
+    last.id ?? `idx${lastIndex}`,
+    last.type ?? "",
+    (last.text ?? "").length,
+    last.callID ?? "",
+    last.state?.status ?? "",
+  ].join("|")
+  return `${assistant.info?.id ?? ""}#${parts.length}#${partKey}`
+}
+
+// A tool part that is actively executing may legitimately produce no stream
+// bytes for a long time (local work), so the tool-level timeout must own that
+// case rather than the mid-turn stall detector. A merely "pending" tool (never
+// entered execution) is NOT protected - that is the T11 failure mode.
+function hasRunningToolPart(assistant: SessionMessage | undefined): boolean {
+  const parts = assistant?.parts ?? []
+  return parts.some(
+    (part) =>
+      part.type !== undefined
+      && PENDING_TOOL_PART_TYPES.has(part.type)
+      && part.state?.status === RUNNING_TOOL_STATUS,
+  )
 }
 
 async function fetchSessionMessages(
@@ -121,6 +159,7 @@ export async function pollSyncSession(
     childWakeGraceMs?: number
     stalledTurnNudgeGraceMs?: number
     dispatchStalledTurnNudge?: (sessionID: string) => Promise<boolean>
+    midTurnStallGraceMs?: number
   },
   timeoutMs?: number
 ): Promise<string | null> {
@@ -142,6 +181,10 @@ export async function pollSyncSession(
   let stalledAssistantId: string | undefined
   let stalledSince = 0
   let stalledNudgeCount = 0
+  const midTurnStallGraceMs = input.midTurnStallGraceMs ?? MID_TURN_STALL_GRACE_MS
+  let midTurnFingerprint: string | undefined
+  let midTurnAssistantId: string | undefined
+  let midTurnFrozenSince = 0
   const shouldWaitForChildTasks = (currentAssistantId: string | undefined): boolean => {
     if (input.hasActiveChildBackgroundTasks?.(input.sessionID)) {
       childWaitAssistantId = currentAssistantId
@@ -222,9 +265,61 @@ export async function pollSyncSession(
     }
 
     if (isActiveSessionStatus(sessionStatus)) {
-      inactiveStart = Date.now()
+      const nowMs = Date.now()
+      inactiveStart = nowMs
+      // Mid-turn stall: a provider stream can open a reasoning/text part (or
+      // announce a pending tool) then go silent without closing the stream or
+      // emitting an error. The session stays "busy" indefinitely, so the
+      // inactivity timeout above never fires (it resets every active poll).
+      // Fingerprint the in-progress turn; if it does not advance within the
+      // grace window and no tool is actively running, abort and surface a
+      // retryable result to the parent instead of hanging.
+      let midTurnMessages: SessionMessage[] | undefined
+      try {
+        midTurnMessages = await fetchSessionMessages(client, input.sessionID)
+      } catch (error) {
+        log("[task] Mid-turn stall fetch failed, skipping this poll", { sessionID: input.sessionID, error: String(error) })
+      }
+      if (midTurnMessages) {
+        const midTurnAssistant = [...midTurnMessages].reverse().find((m) => m.info?.role === "assistant")
+        const fingerprint = computeMidTurnFingerprint(midTurnAssistant)
+        if (fingerprint === undefined) {
+          midTurnFingerprint = undefined
+          midTurnAssistantId = undefined
+          midTurnFrozenSince = 0
+        } else if (
+          midTurnAssistant?.info?.id !== midTurnAssistantId
+          || fingerprint !== midTurnFingerprint
+        ) {
+          midTurnAssistantId = midTurnAssistant?.info?.id
+          midTurnFingerprint = fingerprint
+          midTurnFrozenSince = nowMs
+        } else if (nowMs - midTurnFrozenSince >= midTurnStallGraceMs) {
+          if (hasRunningToolPart(midTurnAssistant)) {
+            // Legit long-running tool; let the tool-level timeout own this.
+            midTurnFrozenSince = nowMs
+          } else {
+            const frozenMs = nowMs - midTurnFrozenSince
+            log("[task] Mid-turn stall detected (busy with no stream or tool progress), aborting", {
+              sessionID: input.sessionID,
+              assistantID: midTurnAssistant?.info?.id,
+              fingerprint,
+              frozenMs,
+            })
+            abortSyncSession(client, input.sessionID, "mid_turn_stall")
+            if (input.toastManager && input.taskId) input.toastManager.removeTask(input.taskId)
+            return `Task aborted: subagent stalled mid-turn for ${midTurnStallGraceMs}ms with no stream or tool progress. This is retryable. Session ID: ${input.sessionID}`
+          }
+        }
+      }
       continue
     }
+
+    // Session is not active this poll; clear mid-turn freeze tracking so a later
+    // busy turn is evaluated fresh and never inherits a stale freeze timer.
+    midTurnFingerprint = undefined
+    midTurnAssistantId = undefined
+    midTurnFrozenSince = 0
 
     let messages: SessionMessage[]
     try {
