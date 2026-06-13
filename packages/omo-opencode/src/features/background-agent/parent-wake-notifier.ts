@@ -107,6 +107,28 @@ export class ParentWakeNotifier {
     await this.flushRunner.flushPendingParentWake(sessionID)
   }
 
+  /**
+   * Immediately force-enqueue a completion notification without the defer cycle.
+   * Unlike the normal path (queue → defer while parent busy → force after 120s),
+   * this skips straight to the force dispatch: noReply + enqueue at gate.
+   * Only safe for completion notifications (shouldReply=false) — reply-required
+   * wakes must still go through the full safety path.
+   */
+  forceEnqueueCompletion(
+    sessionID: string,
+    notification: string,
+    promptContext: ParentWakePromptContext,
+  ): void {
+    this.pendingQueue.queueWake(sessionID, notification, promptContext, false)
+    const wake = this.pendingQueue.getWake(sessionID)
+    if (!wake) return
+    // Set deferral budget to expired so the flush runner immediately
+    // takes the force-dispatch path without any isSessionActive check.
+    wake.firstDeferredAt = 0
+    wake.deferCount = 0
+    void this.flushRunner.flushPendingParentWake(sessionID)
+  }
+
   clearDispatchedParentWake(sessionID: string): void {
     this.dispatchedTracker.clearWake(sessionID)
   }

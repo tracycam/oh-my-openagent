@@ -2719,36 +2719,53 @@ The task was re-queued on a fallback model after a retryable failure.
         const isTaskFailure = task.status === "error" || task.status === "cancelled" || task.status === "interrupt"
         const shouldReply = allComplete || isTaskFailure
 
-        const shouldDeferNotification = await this.isSessionActive(task.parentSessionId)
-
-        if (shouldDeferNotification) {
-          this.queuePendingParentWake(
+        // Completion-only notifications (not all-complete, not failure):
+        // force-enqueue immediately as noReply+enqueue instead of cycling
+        // through the full 120s deferred-flush loop. Failure and all-complete
+        // notifications still use the safety path — they need a reply-producing
+        // prompt that requires the parent session to be idle.
+        if (!shouldReply) {
+          this.parentWakeNotifier.forceEnqueueCompletion(
             task.parentSessionId,
             notification,
             parentPromptContext,
-            shouldReply,
-            PENDING_PARENT_WAKE_DEBOUNCE_MS,
           )
-          log("[background-agent] Queued notification while parent session is active:", {
+          log("[background-agent] Force-enqueued completion notification immediately:", {
             taskId: task.id,
             allComplete,
             isTaskFailure,
-            shouldReply,
           })
         } else {
-          this.queuePendingParentWake(
-            task.parentSessionId,
-            notification,
-            parentPromptContext,
-            shouldReply,
-            PENDING_PARENT_WAKE_DEBOUNCE_MS,
-          )
-          log("[background-agent] Queued notification for short-debounce flush to idle parent:", {
-            taskId: task.id,
-            allComplete,
-            isTaskFailure,
-            shouldReply,
-          })
+          const shouldDeferNotification = await this.isSessionActive(task.parentSessionId)
+          if (shouldDeferNotification) {
+            this.queuePendingParentWake(
+              task.parentSessionId,
+              notification,
+              parentPromptContext,
+              shouldReply,
+              PENDING_PARENT_WAKE_DEBOUNCE_MS,
+            )
+            log("[background-agent] Queued notification while parent session is active:", {
+              taskId: task.id,
+              allComplete,
+              isTaskFailure,
+              shouldReply,
+            })
+          } else {
+            this.queuePendingParentWake(
+              task.parentSessionId,
+              notification,
+              parentPromptContext,
+              shouldReply,
+              PENDING_PARENT_WAKE_DEBOUNCE_MS,
+            )
+            log("[background-agent] Queued notification for short-debounce flush to idle parent:", {
+              taskId: task.id,
+              allComplete,
+              isTaskFailure,
+              shouldReply,
+            })
+          }
         }
       } else {
         log("[background-agent] Parent session notifications disabled, skipping prompt injection:", {

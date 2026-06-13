@@ -295,7 +295,10 @@ export class ParentWakeFlushRunner {
   // turn boundary instead of skipping it, so a perpetually busy parent still
   // receives the content. Reset the deferral budget afterwards so a retained
   // reply wake cannot re-force every second.
-  private async forceDispatchAfterMaxDeferral(sessionID: string, wake: PendingParentWake): Promise<void> {
+  //
+  // Made public so completion-only notifications can skip the full defer cycle
+  // and force-enqueue immediately.
+  async forceDispatchAfterMaxDeferral(sessionID: string, wake: PendingParentWake): Promise<void> {
     log("[background-agent] Force-dispatching parent wake after max deferral", {
       sessionID,
       deferCount: wake.deferCount,
