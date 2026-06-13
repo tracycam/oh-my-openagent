@@ -1,14 +1,14 @@
+import { dispatchInternalPrompt, isInternalPromptDispatchAccepted } from "../../hooks/shared/prompt-async-gate"
 import {
   createInternalAgentTextPart,
   isVerifiableAmbiguousPromptFailure,
   log,
   withInternalNoReplyMarker,
 } from "../../shared"
-import { dispatchInternalPrompt, isInternalPromptDispatchAccepted } from "../../hooks/shared/prompt-async-gate"
 import type { InternalPromptQueueBehavior, PromptDispatchClient } from "../../shared/prompt-async-gate/types"
 import { getErrorText } from "./error-classifier"
-import { createEmptyAssistantTurnRetryDedupeKey } from "./parent-wake-history-state"
 import { cloneParentWake, isRedundantParentWake, type PendingParentWake } from "./parent-wake-dedupe"
+import { createEmptyAssistantTurnRetryDedupeKey } from "./parent-wake-history-state"
 import type { ToolWaitDeferralDecision } from "./parent-wake-session-history"
 import type { SessionExistenceStatus } from "./session-existence"
 
@@ -57,6 +57,7 @@ function resolveWakePromptContent(wake: PendingParentWake, forceNoReply: boolean
 
 export async function sendParentWakePrompt(input: ParentWakePromptDispatchInput): Promise<void> {
   const notificationContent = resolveWakePromptContent(input.latestWake, input.forceNoReply)
+  const promptNoReply = input.forceNoReply === true || !input.latestWake.shouldReply
   if (notificationContent === RETAINED_WAKE_CONTINUATION_TEXT) {
     log("[background-agent] Dispatching retained wake as lightweight continuation (full text already admitted):", {
       sessionID: input.sessionID,
@@ -87,10 +88,10 @@ export async function sendParentWakePrompt(input: ParentWakePromptDispatchInput)
       input: {
         path: { id: input.sessionID },
         body: {
-          noReply: input.forceNoReply === true || !input.latestWake.shouldReply,
+          noReply: promptNoReply,
           ...input.latestWake.promptContext,
           parts: [
-            input.forceNoReply === true || !input.latestWake.shouldReply
+            promptNoReply
               ? withInternalNoReplyMarker(createInternalAgentTextPart(notificationContent))
               : createInternalAgentTextPart(notificationContent),
           ],
@@ -104,7 +105,9 @@ export async function sendParentWakePrompt(input: ParentWakePromptDispatchInput)
         dispatchedWake.dispatchedAt = dispatchStartedAt
         if (await input.hasRecordedPromptAfterDispatch(dispatchedWake)) {
           markRetainedNoReplyAdmission(input, dispatchStartedAt)
-          input.trackDispatchedWake(createTrackedDispatchedWake(input.latestWake, input.forceNoReply), dispatchStartedAt)
+          if (!promptNoReply) {
+            input.trackDispatchedWake(input.latestWake, dispatchStartedAt)
+          }
           log("[background-agent] Treated failed parent wake prompt as accepted after observing session history:", {
             sessionID: input.sessionID,
             error: promptResult.error,
@@ -169,7 +172,9 @@ export async function sendParentWakePrompt(input: ParentWakePromptDispatchInput)
     log("[background-agent] Sent deferred parent wake:", { sessionID: input.sessionID })
     delete input.latestWake.allowEmptyAssistantTurnRetry
     markRetainedNoReplyAdmission(input, dispatchStartedAt)
-    input.trackDispatchedWake(createTrackedDispatchedWake(input.latestWake, input.forceNoReply), dispatchStartedAt)
+    if (!promptNoReply) {
+      input.trackDispatchedWake(input.latestWake, dispatchStartedAt)
+    }
   } catch (error) {
     const errorText = error instanceof Error ? `${error.name}: ${error.message}` : getErrorText(error) || String(error)
     if (input.checkSessionExists !== undefined) {
@@ -196,15 +201,4 @@ function markRetainedNoReplyAdmission(input: ParentWakePromptDispatchInput, disp
   input.latestWake.noReplyAdmittedAt = dispatchStartedAt
   input.latestWake.noReplyAdmittedNotificationCount = input.latestWake.notifications.length
   input.scheduleFlush()
-}
-
-function createTrackedDispatchedWake(wake: PendingParentWake, forceNoReply: boolean | undefined): PendingParentWake {
-  if (forceNoReply !== true || !wake.shouldReply) {
-    return wake
-  }
-
-  return {
-    ...cloneParentWake(wake),
-    shouldReply: false,
-  }
 }

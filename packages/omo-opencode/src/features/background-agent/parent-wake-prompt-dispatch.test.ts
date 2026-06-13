@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { releaseAllPromptAsyncReservationsForTesting } from "../../hooks/shared/prompt-async-gate"
 import { unsafeTestValue } from "../../../../../test-support/unsafe-test-value"
+import { releaseAllPromptAsyncReservationsForTesting } from "../../hooks/shared/prompt-async-gate"
 import type { PendingParentWake } from "./parent-wake-dedupe"
 import {
   RETAINED_WAKE_CONTINUATION_TEXT,
@@ -125,5 +125,35 @@ describe("sendParentWakePrompt - retained wake content downgrade", () => {
     expect((bodies[0] as { noReply?: boolean }).noReply).toBe(true)
     // and the admit records the notification count for the later downgrade decision
     expect(wake.noReplyAdmittedNotificationCount).toBe(1)
+  })
+
+  test("#given noReply prompt reports ambiguous EOF but history proves acceptance #when sending #then it is not tracked as a dispatched reply wake", async () => {
+    const wake = createWake({ shouldReply: false })
+    const bodies: unknown[] = []
+    let trackCount = 0
+
+    try {
+      await sendParentWakePrompt(createDispatchInput(wake, bodies, {
+        client: {
+          session: {
+            promptAsync: async (input: { body?: unknown }) => {
+              bodies.push(input.body)
+              throw new Error("JSON Parse error: Unexpected EOF")
+            },
+            messages: async () => ({ data: [] }),
+          },
+        } as DispatchInput["client"],
+        hasRecordedPromptAfterDispatch: async () => true,
+        trackDispatchedWake: () => {
+          trackCount += 1
+        },
+      }))
+    } finally {
+      releaseAllPromptAsyncReservationsForTesting()
+    }
+
+    expect(bodies).toHaveLength(1)
+    expect((bodies[0] as { noReply?: boolean }).noReply).toBe(true)
+    expect(trackCount).toBe(0)
   })
 })

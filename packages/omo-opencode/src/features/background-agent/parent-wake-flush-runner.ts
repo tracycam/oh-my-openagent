@@ -1,13 +1,13 @@
-import { log } from "../../shared"
 import { isSessionActive as isOpenCodeSessionActive, settleAfterSessionIdle } from "../../hooks/shared/session-idle-settle"
+import { log } from "../../shared"
 import type { InternalPromptQueueBehavior } from "../../shared/prompt-async-gate/types"
 import { isFailureParentWake, isRedundantParentWake, type PendingParentWake } from "./parent-wake-dedupe"
 import type { ParentWakeDispatchedTracker } from "./parent-wake-dispatched-tracker"
+import type { ParentWakeNotifierDeps } from "./parent-wake-notifier-types"
 import type { ParentWakePendingQueue } from "./parent-wake-pending-queue"
 import { sendParentWakePrompt } from "./parent-wake-prompt-dispatch"
 import type { ToolWaitDeferralDecision } from "./parent-wake-session-history"
 import type { ParentWakeSessionInspector } from "./parent-wake-session-inspector"
-import type { ParentWakeNotifierDeps } from "./parent-wake-notifier-types"
 
 type ParentWakeFlushRunnerDeps = {
   readonly notifierDeps: ParentWakeNotifierDeps
@@ -381,6 +381,7 @@ export class ParentWakeFlushRunner {
       wake.deferCount = 0
       if (wake.shouldReply) {
         wake.noReplyAdmittedAt = Date.now()
+        wake.noReplyAdmittedNotificationCount = wake.notifications.length
       }
     }
     this.schedulePendingParentWakeFlush(sessionID)

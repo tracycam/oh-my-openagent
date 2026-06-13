@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { tmpdir } from "node:os"
 import type { PluginInput } from "@opencode-ai/plugin"
-import { BackgroundManager } from "./manager"
-import { ParentWakeNotifier } from "./parent-wake-notifier"
-import { ParentWakePendingQueue } from "./parent-wake-pending-queue"
-import type { BackgroundTask } from "./types"
-import { RETAINED_WAKE_CONTINUATION_TEXT } from "./parent-wake-prompt-dispatch"
 import {
   releaseAllPromptAsyncReservationsForTesting,
   releasePromptAsyncReservation,
 } from "../../hooks/shared/prompt-async-gate"
+import { BackgroundManager } from "./manager"
+import { ParentWakeNotifier } from "./parent-wake-notifier"
+import { ParentWakePendingQueue } from "./parent-wake-pending-queue"
+import { RETAINED_WAKE_CONTINUATION_TEXT } from "./parent-wake-prompt-dispatch"
+import type { BackgroundTask } from "./types"
 
 type PromptAsyncCall = {
   path: { id: string }
@@ -186,6 +186,7 @@ describe("parent wake noReply admission liveness (issues #4874/#5086)", () => {
       expect(promptAsyncCalls).toHaveLength(2)
       expect(promptAsyncCalls[1]?.body.noReply).toBe(false)
       expect(JSON.stringify(promptAsyncCalls[1]?.body.parts)).toContain(RETAINED_WAKE_CONTINUATION_TEXT)
+      expect(notifier.getDispatchedParentWakes().has("parent-1")).toBe(true)
       expect(notifier.getPendingParentWakes().has("parent-1")).toBe(false)
     } finally {
       Date.now = originalDateNow
@@ -194,7 +195,7 @@ describe("parent wake noReply admission liveness (issues #4874/#5086)", () => {
     }
   })
 
-  test("#given noReply admission of a reply-required wake #then the dispatched tracker does not claim reply coverage", async () => {
+  test("#given noReply admission of a reply-required wake #then no dispatched-wake recovery is started", async () => {
     // given
     const originalDateNow = Date.now
     Date.now = () => 100_000
@@ -208,9 +209,12 @@ describe("parent wake noReply admission liveness (issues #4874/#5086)", () => {
       // when
       await notifier.flushPendingParentWake("parent-1")
 
-      // then: the admission must not phantom-satisfy a later reply-required flush
+      // then: the admission must not start B3 recovery; the pending retained
+      // wake owns reply liveness until the parent is safe.
       expect(promptAsyncCalls).toHaveLength(1)
-      expect(notifier.getDispatchedParentWakes().get("parent-1")?.shouldReply).toBe(false)
+      expect(notifier.getDispatchedParentWakes().has("parent-1")).toBe(false)
+      expect(notifier.getDispatchedParentWakeTimers().has("parent-1")).toBe(false)
+      expect(notifier.getPendingParentWakes().get("parent-1")?.shouldReply).toBe(true)
     } finally {
       Date.now = originalDateNow
       notifier.shutdown()

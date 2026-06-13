@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { ParentWakeNotifier } from "./parent-wake-notifier"
-import type { SessionExistenceStatus } from "./session-existence"
 import {
   releaseAllPromptAsyncReservationsForTesting,
   releasePromptAsyncReservation,
 } from "../../hooks/shared/prompt-async-gate"
 import { schedulePromptQueueDrain } from "../../shared/prompt-async-gate/queue"
 import { deletePromptReservation, setPromptReservation } from "../../shared/prompt-async-gate/reservations"
+import { ParentWakeNotifier } from "./parent-wake-notifier"
+import { RETAINED_WAKE_CONTINUATION_TEXT } from "./parent-wake-prompt-dispatch"
+import type { SessionExistenceStatus } from "./session-existence"
 
 type PromptAsyncCall = {
   path: { id: string }
@@ -38,6 +39,20 @@ const FINAL_WAKE = [
   "- `task-a`: task A",
   "",
   'Use `background_output(task_id="<id>")` to retrieve each result.',
+  "</system-reminder>",
+].join("\n")
+
+const PROGRESS_WAKE = [
+  "<system-reminder>",
+  "[BACKGROUND TASK RESULT READY]",
+  "**ID:** `task-a`",
+  "**Description:** task A",
+  "**Duration:** 1m",
+  "",
+  "**1 task still in progress.** You WILL be notified when ALL complete.",
+  "Do NOT poll - continue productive work.",
+  "",
+  'Use `background_output(task_id="task-a")` to retrieve this result when ready.',
   "</system-reminder>",
 ].join("\n")
 
@@ -268,6 +283,41 @@ describe("BUG B2: retained reply-wake never re-flushed (upstream #5189)", () => 
 })
 
 describe("BUG B3: dispatched-wake silent loss requeues after repeated empty windows", () => {
+  test("#given a progress noReply wake with no assistant output #when B3 windows would elapse #then it is not requeued or duplicated", async () => {
+    // given: progress notifications intentionally do not wake a parent reply;
+    // absence of assistant output is expected and must not trigger B3 recovery.
+    const { notifier, promptAsyncCalls } = createNotifier({
+      sessionStatuses: { "parent-1": { type: "idle" } },
+      messagesProvider: () => SAFE_MESSAGES,
+      failureRequeueWindowMs: 5,
+      maxWindowRefreshes: 1,
+    })
+    notifier.queuePendingParentWake("parent-1", PROGRESS_WAKE, { agent: "sisyphus" }, false)
+
+    try {
+      // when: the progress wake dispatches as noReply
+      await notifier.flushPendingParentWake("parent-1")
+
+      // then: it is accepted once and does not start a dispatched-wake timer
+      expect(promptAsyncCalls).toHaveLength(1)
+      expect(promptAsyncCalls[0]?.body.noReply).toBe(true)
+      expect(notifier.getPendingParentWakes().has("parent-1")).toBe(false)
+      expect(notifier.getDispatchedParentWakes().has("parent-1")).toBe(false)
+      expect(notifier.getDispatchedParentWakeTimers().has("parent-1")).toBe(false)
+
+      // when: enough time passes for B3 to have requeued a tracked wake
+      await new Promise<void>((resolve) => setTimeout(resolve, 30))
+
+      // then: no duplicate progress notification is injected
+      expect(promptAsyncCalls).toHaveLength(1)
+      expect(notifier.getPendingParentWakes().has("parent-1")).toBe(false)
+      expect(notifier.getDispatchedParentWakes().has("parent-1")).toBe(false)
+    } finally {
+      notifier.shutdown()
+      releaseAllPromptAsyncReservationsForTesting()
+    }
+  })
+
   test("#given a dispatched wake with no assistant output #when the failure window refreshes maxWindowRefreshes times #then the wake is requeued into the pending queue", async () => {
     // given: the parent is safe so the wake dispatches normally, but no
     // assistant/tool output ever appears after the dispatch (silent drop).
@@ -541,6 +591,8 @@ describe("force-queued lifecycle is gate-truthful", () => {
       // then: the retained reply wake resumes with a reply instead of deadlocking
       expect(promptAsyncCalls).toHaveLength(2)
       expect(promptAsyncCalls[1]?.body.noReply).toBe(false)
+      expect(JSON.stringify(promptAsyncCalls[1]?.body.parts)).toContain(RETAINED_WAKE_CONTINUATION_TEXT)
+      expect(JSON.stringify(promptAsyncCalls[1]?.body.parts)).not.toContain("ALL BACKGROUND TASKS COMPLETE")
       expect(notifier.getPendingParentWakes().has("parent-1")).toBe(false)
     } finally {
       Date.now = originalDateNow
