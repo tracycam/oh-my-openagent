@@ -358,7 +358,13 @@ export class ParentWakeFlushRunner {
       delete wake.forcedQueuedAt
       delete wake.forceQueueToken
     }
-    this.schedulePendingParentWakeFlush(sessionID)
+    // BUG B3: only re-flush when a wake is still pending. Completion-only
+    // force-enqueues (retainPendingWake=false) delete the wake before the
+    // gate processes the entry; scheduling a re-flush here would pick up
+    // a NEW wake from a subsequent task completion → double delivery.
+    if (this.deps.pendingQueue.hasWake(sessionID)) {
+      this.schedulePendingParentWakeFlush(sessionID)
+    }
   }
 
   // The gate ACTUALLY dispatched the previously-queued
@@ -386,6 +392,10 @@ export class ParentWakeFlushRunner {
         wake.noReplyAdmittedAt = Date.now()
       }
     }
-    this.schedulePendingParentWakeFlush(sessionID)
+    // BUG B3: guard against re-flushing when the wake has been deleted
+    // by a completion-only force-enqueue (retainPendingWake=false).
+    if (this.deps.pendingQueue.hasWake(sessionID)) {
+      this.schedulePendingParentWakeFlush(sessionID)
+    }
   }
 }
