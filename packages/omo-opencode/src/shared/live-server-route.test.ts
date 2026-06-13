@@ -144,6 +144,24 @@ describe("live-server-route", () => {
       expect(result2.client).toBe(fakeLiveClient)
       expect(callCount()).toBe(1)
     })
+
+    test("#given a live server route #when availability is probed #then the bounded health endpoint is used", async () => {
+      //#given
+      const probedPaths: string[] = []
+      _setFetchImplementationForTesting((async (url: RequestInfo | URL, _init?: RequestInit): Promise<Response> => {
+        probedPaths.push(new URL(String(url)).pathname)
+        return { ok: true, status: 200 } as Response
+      }) as typeof fetch)
+      initLiveServerRoute({ serverUrl: FAKE_SERVER_URL, directory: "/tmp/test", inProcessClient: fakeInProcessClient })
+      _setLiveClientForTesting(fakeLiveClient)
+
+      //#when
+      const result = await resolveDispatchClient(fakeInProcessClient, "ses_probe_health")
+
+      //#then
+      expect(result.route).toBe("live")
+      expect(probedPaths).toEqual(["/global/health"])
+    })
   })
 
   describe("resolveDispatchClient — 401 → unavailable + warn-once", () => {

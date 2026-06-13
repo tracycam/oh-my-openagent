@@ -1,6 +1,67 @@
 import type { PluginInput } from "@opencode-ai/plugin"
-import { log } from "../../shared"
+import { isRecord, log } from "../../shared"
 import { normalizeSDKResponse } from "../../shared"
+
+function getMessageRole(message: unknown): unknown {
+  if (!isRecord(message)) {
+    return undefined
+  }
+  const info = message.info
+  return isRecord(info) ? info.role : undefined
+}
+
+function messagesAfterAnchor(messages: readonly unknown[], anchorMessageCount: number | undefined): readonly unknown[] {
+  return anchorMessageCount === undefined ? messages : messages.slice(anchorMessageCount)
+}
+
+function valueHasText(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0
+}
+
+function contentBlockHasText(block: unknown): boolean {
+  if (!isRecord(block)) {
+    return false
+  }
+
+  const type = block.type
+  if ((type === "text" || type === "reasoning") && valueHasText(block.text)) {
+    return true
+  }
+  return valueHasText(block.content)
+}
+
+function messagePartHasResponseContent(part: unknown): boolean {
+  if (!isRecord(part)) {
+    return false
+  }
+
+  const type = part.type
+  if ((type === "text" || type === "reasoning") && valueHasText(part.text)) {
+    return true
+  }
+  if (valueHasText(part.content)) {
+    return true
+  }
+  if (Array.isArray(part.content)) {
+    return part.content.some(contentBlockHasText)
+  }
+  return false
+}
+
+function getMessageParts(message: unknown): readonly unknown[] {
+  if (!isRecord(message)) {
+    return []
+  }
+  return Array.isArray(message.parts) ? message.parts : []
+}
+
+function hasAssistantOrToolResponse(messages: readonly unknown[]): boolean {
+  return messages.some((message) => {
+    const role = getMessageRole(message)
+    return (role === "assistant" || role === "tool")
+      && getMessageParts(message).some(messagePartHasResponseContent)
+  })
+}
 
 export async function waitForCompletion(
   sessionID: string,
@@ -11,7 +72,8 @@ export async function waitForCompletion(
     abort: AbortSignal
     metadata?: (input: { title?: string; metadata?: Record<string, unknown> }) => void
   },
-  ctx: PluginInput
+  ctx: PluginInput,
+  anchorMessageCount?: number,
 ): Promise<void> {
   log(`[call_omo_agent] Polling for completion...`)
 
@@ -48,8 +110,9 @@ export async function waitForCompletion(
       preferResponseOnMissingData: true,
     })
     const currentMsgCount = msgs.length
+    const newMessages = messagesAfterAnchor(msgs, anchorMessageCount)
 
-    if (currentMsgCount === 0) {
+    if (newMessages.length === 0) {
       stablePolls = 0
       lastMsgCount = 0
       if (!sawActiveStatus && Date.now() - pollStart >= PROMPT_ACCEPTANCE_TIMEOUT_MS) {
@@ -58,7 +121,13 @@ export async function waitForCompletion(
       continue
     }
 
-    if (currentMsgCount > 0 && currentMsgCount === lastMsgCount) {
+    if (!hasAssistantOrToolResponse(newMessages)) {
+      stablePolls = 0
+      lastMsgCount = currentMsgCount
+      continue
+    }
+
+    if (currentMsgCount === lastMsgCount) {
       stablePolls++
       if (stablePolls >= STABILITY_REQUIRED) {
         log(`[call_omo_agent] Session complete, ${currentMsgCount} messages`)

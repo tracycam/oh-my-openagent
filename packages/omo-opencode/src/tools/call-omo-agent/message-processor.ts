@@ -3,13 +3,18 @@ import { log } from "../../shared"
 import { consumeNewMessages } from "../../shared/session-cursor"
 
 interface SDKMessage {
-  info?: { role?: string; time?: { created?: number } }
-  parts?: Array<{ type: string; text?: string; content?: string | Array<{ type: string; text?: string }> }>
+  readonly info?: { readonly role?: string; readonly time?: { readonly created?: number } }
+  readonly parts?: ReadonlyArray<{
+    readonly type: string
+    readonly text?: string
+    readonly content?: string | ReadonlyArray<{ readonly type: string; readonly text?: string }>
+  }>
 }
 
 export async function processMessages(
   sessionID: string,
-  ctx: PluginInput
+  ctx: PluginInput,
+  anchorMessageCount?: number,
 ): Promise<string> {
   const messagesResult = await ctx.client.session.messages({
     path: { id: sessionID },
@@ -20,7 +25,9 @@ export async function processMessages(
     throw new Error(`Failed to get messages: ${messagesResult.error}`)
   }
 
-  const messages = messagesResult.data
+  const messages = anchorMessageCount === undefined
+    ? messagesResult.data
+    : messagesResult.data.slice(anchorMessageCount)
   log(`[call_omo_agent] Got ${messages.length} messages`)
 
   // Include both assistant messages AND tool messages
@@ -44,7 +51,9 @@ export async function processMessages(
     return timeA - timeB
   })
 
-  const newMessages = consumeNewMessages(sessionID, sortedMessages)
+  const newMessages = anchorMessageCount === undefined
+    ? consumeNewMessages(sessionID, sortedMessages)
+    : sortedMessages
 
   if (newMessages.length === 0) {
     return "No new output since last check."
@@ -77,10 +86,13 @@ export async function processMessages(
   }
 
   const responseText = extractedContent
-    .filter((text) => text.length > 0)
+    .filter((text) => text.trim().length > 0)
     .join("\n\n")
 
   log(`[call_omo_agent] Got response, length: ${responseText.length}`)
+  if (responseText.length === 0) {
+    throw new Error("No assistant or tool response content found")
+  }
 
   return responseText
 }

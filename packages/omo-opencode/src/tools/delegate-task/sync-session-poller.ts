@@ -26,6 +26,10 @@ function wait(milliseconds: number): Promise<void> {
 }
 
 function abortSyncSession(client: OpencodeClient, sessionID: string, reason: string): void {
+  if (typeof client.session.abort !== "function") {
+    log("[task] Sync session abort unavailable", { sessionID, reason })
+    return
+  }
   log("[task] Aborting sync session", { sessionID, reason })
   void client.session.abort({
     path: { id: sessionID },
@@ -113,6 +117,40 @@ export function isSessionComplete(messages: SessionMessage[]): boolean {
   if (lastAssistant.parts?.some((part) => part.type && PENDING_TOOL_PART_TYPES.has(part.type))) return false
   if (!lastUser?.info?.id || !lastAssistant?.info?.id) return false
   return lastUser.info.id < lastAssistant.info.id
+}
+
+function getMessagesAfterAnchor(messages: SessionMessage[], anchorMessageCount: number | undefined): SessionMessage[] {
+  return anchorMessageCount === undefined ? messages : messages.slice(anchorMessageCount)
+}
+
+function assistantHasText(message: SessionMessage | undefined): boolean {
+  if (message?.info?.role !== "assistant") return false
+  const parts = message.parts ?? []
+  return parts.some((p) => {
+    if (p.type !== "text" && p.type !== "reasoning") return false
+    const text = (p.text ?? "").trim()
+    return text.length > 0
+  })
+}
+
+function isPostAnchorSessionComplete(messages: SessionMessage[], allowAssistantOnlyTerminal: boolean): boolean {
+  if (isSessionComplete(messages)) {
+    return true
+  }
+  if (!allowAssistantOnlyTerminal) {
+    return false
+  }
+  const lastAssistant = [...messages].reverse().find((msg) => msg.info?.role === "assistant")
+  if (!lastAssistant?.info?.finish) {
+    return false
+  }
+  if (NON_TERMINAL_FINISH_REASONS.has(lastAssistant.info.finish)) {
+    return false
+  }
+  if (lastAssistant.parts?.some((part) => part.type && PENDING_TOOL_PART_TYPES.has(part.type))) {
+    return false
+  }
+  return assistantHasText(lastAssistant)
 }
 
 const DEFAULT_MAX_ASSISTANT_TURNS = 300
@@ -281,7 +319,8 @@ export async function pollSyncSession(
         log("[task] Mid-turn stall fetch failed, skipping this poll", { sessionID: input.sessionID, error: String(error) })
       }
       if (midTurnMessages) {
-        const midTurnAssistant = [...midTurnMessages].reverse().find((m) => m.info?.role === "assistant")
+        const midTurnMessagesAfterAnchor = getMessagesAfterAnchor(midTurnMessages, input.anchorMessageCount)
+        const midTurnAssistant = [...midTurnMessagesAfterAnchor].reverse().find((m) => m.info?.role === "assistant")
         const fingerprint = computeMidTurnFingerprint(midTurnAssistant)
         if (fingerprint === undefined) {
           midTurnFingerprint = undefined
@@ -333,14 +372,16 @@ export async function pollSyncSession(
       continue
     }
 
-    const sessionError = getTerminalSessionError(messages)
+    const messagesAfterAnchor = getMessagesAfterAnchor(messages, input.anchorMessageCount)
+
+    const sessionError = getTerminalSessionError(messagesAfterAnchor)
     if (sessionError) {
       log("[task] Poll detected terminal session error", { sessionID: input.sessionID, sessionError })
       return sessionError
     }
 
-    if (isSessionComplete(messages)) {
-      const currentAssistantId = [...messages].reverse().find((m) => m.info?.role === "assistant")?.info?.id
+    if (isPostAnchorSessionComplete(messagesAfterAnchor, input.anchorMessageCount !== undefined)) {
+      const currentAssistantId = [...messagesAfterAnchor].reverse().find((m) => m.info?.role === "assistant")?.info?.id
       if (shouldWaitForChildTasks(currentAssistantId)) {
         continue
       }
@@ -349,7 +390,7 @@ export async function pollSyncSession(
     }
 
     // Count new assistant turns to circuit-break infinite loops
-    const lastAssistant = [...messages].reverse().find((m) => m.info?.role === "assistant")
+    const lastAssistant = [...messagesAfterAnchor].reverse().find((m) => m.info?.role === "assistant")
     if (lastAssistant?.info?.id && lastAssistant.info.id !== lastSeenAssistantId) {
       lastSeenAssistantId = lastAssistant.info.id
       assistantTurnCount++
@@ -370,7 +411,7 @@ export async function pollSyncSession(
     // and without an error event). isSessionComplete will never accept it and
     // no error-driven recovery fires, so without intervention the poll would
     // wait out the full inactivity timeout. Nudge the session to continue.
-    const lastUserForStall = [...messages].reverse().find((m) => m.info?.role === "user")
+    const lastUserForStall = [...messagesAfterAnchor].reverse().find((m) => m.info?.role === "user")
     const isStalledUnknownTurn =
       lastAssistant?.info?.id !== undefined
       && lastAssistant.info.finish === "unknown"
@@ -407,17 +448,7 @@ export async function pollSyncSession(
       stalledAssistantId = undefined
     }
 
-    const hasAssistantText = messages.some((m) => {
-      if (m.info?.role !== "assistant") return false
-      const parts = m.parts ?? []
-      return parts.some((p) => {
-        if (p.type !== "text" && p.type !== "reasoning") return false
-        const text = (p.text ?? "").trim()
-        return text.length > 0
-      })
-    })
-
-    if (!lastAssistant?.info?.finish && hasAssistantText) {
+    if (!lastAssistant?.info?.finish && assistantHasText(lastAssistant)) {
       if (shouldWaitForChildTasks(lastAssistant?.info?.id)) {
         continue
       }

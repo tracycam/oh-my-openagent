@@ -197,6 +197,35 @@ describe("BackgroundManager parent wake empty-turn recovery", () => {
     ])
   })
 
+  test("#given dispatched parent wake #when OpenCode records an assistant skeleton update #then the wake remains tracked for recovery", async () => {
+    // given
+    const { manager, internals, promptCalls } = createManager()
+    managerUnderTest = manager
+    const sessionID = "parent-session-empty-wake"
+    internals.queuePendingParentWake(sessionID, "<system-reminder>done</system-reminder>", { agent: "sisyphus" }, true, 0)
+    await internals.flushPendingParentWake(sessionID)
+    expect(promptCalls).toHaveLength(1)
+    expect(internals.parentWakeNotifier.getDispatchedParentWakes().has(sessionID)).toBe(true)
+
+    // when
+    manager.handleEvent({
+      type: "message.updated",
+      properties: {
+        sessionID,
+        info: {
+          id: "msg-skeleton",
+          sessionID,
+          role: "assistant",
+          finish: "unknown",
+        },
+      },
+    })
+
+    // then
+    expect(internals.parentWakeNotifier.getDispatchedParentWakes().has(sessionID)).toBe(true)
+    expect(internals.parentWakeNotifier.getPendingParentWakes().has(sessionID)).toBe(false)
+  })
+
   test("#given dispatched parent wake has coalesced notifications #when OpenCode records an empty assistant turn #then notification slots are preserved", async () => {
     // given
     const { manager, internals, promptCalls } = createManager()

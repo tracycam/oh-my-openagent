@@ -107,7 +107,7 @@ export async function handleSessionDeletedEvent(args: {
   clearSessionPromptParams(sessionID);
   syncSubagentSessions.delete(sessionID);
   await dispatchOpenClawSessionEvent({ ...args, rawEvent: "session.deleted", sessionID });
-  if (wasSyncSubagentSession) subagentSessions.delete(sessionID);
+  subagentSessions.delete(sessionID);
   deleteSessionTools(sessionID);
   await args.managers.skillMcpManager.disconnectSession(sessionID);
   if (args.tmuxIntegrationEnabled) await args.managers.tmuxSessionManager.onSessionDeleted({ sessionID });

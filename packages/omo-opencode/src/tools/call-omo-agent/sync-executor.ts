@@ -71,6 +71,15 @@ function buildSyncPromptTools(agent: string): Record<string, boolean> {
   }
 }
 
+async function getPreDispatchMessageCount(ctx: PluginInput, sessionID: string, isNewSession: boolean): Promise<number | undefined> {
+  if (isNewSession || typeof ctx.client.session.messages !== "function") {
+    return undefined
+  }
+  const response = await ctx.client.session.messages({ path: { id: sessionID } })
+  const data = response && typeof response === "object" && "data" in response ? response.data : undefined
+  return Array.isArray(data) ? data.length : undefined
+}
+
 export async function executeSync(
   args: CallOmoAgentArgs,
   toolContext: {
@@ -118,6 +127,7 @@ export async function executeSync(
 
     log(`[call_omo_agent] Sending prompt to session ${sessionID}`)
     log(`[call_omo_agent] Prompt text:`, args.prompt.substring(0, 100))
+    const anchorMessageCount = await getPreDispatchMessageCount(ctx, sessionID, session.isNew)
     const normalizedSubagentType = stripAgentListSortPrefix(args.subagent_type)
     const promptAgent = normalizeAgentForPrompt(normalizedSubagentType) ?? normalizedSubagentType
     const promptTools = buildSyncPromptTools(normalizedSubagentType)
@@ -178,9 +188,15 @@ export async function executeSync(
       return `Error: Failed to send prompt: ${errorMessage}\n\n<task_metadata>\nsession_id: ${sessionID}\n</task_metadata>`
     }
 
-    await deps.waitForCompletion(sessionID, toolContext, ctx)
+    if (anchorMessageCount === undefined) {
+      await deps.waitForCompletion(sessionID, toolContext, ctx)
+    } else {
+      await deps.waitForCompletion(sessionID, toolContext, ctx, anchorMessageCount)
+    }
 
-    const responseText = await deps.processMessages(sessionID, ctx)
+    const responseText = anchorMessageCount === undefined
+      ? await deps.processMessages(sessionID, ctx)
+      : await deps.processMessages(sessionID, ctx, anchorMessageCount)
 
     return responseText + "\n\n" + ["<task_metadata>", `session_id: ${sessionID}`, "</task_metadata>"].join("\n")
   } catch (error) {

@@ -717,6 +717,87 @@ describe("force-queue callbacks are identity-bound", () => {
     }
   })
 
+  test("#given a force-queued wake #when the same notification gets a new prompt context #then the stale force-queue token is cleared", async () => {
+    // given
+    const originalDateNow = Date.now
+    const now = 100_000
+    Date.now = () => now
+    const { notifier } = createNotifier({
+      sessionStatuses: { "parent-1": { type: "idle" } },
+      messagesProvider: () => SAFE_MESSAGES,
+      maxDeferMs: 5_000,
+    })
+    reserveForeignGate("parent-1", now)
+    notifier.queuePendingParentWake("parent-1", FINAL_WAKE, { agent: "sisyphus" }, true)
+    const wake = notifier.getPendingParentWakes().get("parent-1")
+    if (!wake) throw new Error("missing wake")
+    wake.firstDeferredAt = now - 5_001
+
+    try {
+      await notifier.flushPendingParentWake("parent-1")
+      expect(notifier.getPendingParentWakes().get("parent-1")?.forcedQueuedAt).toBeDefined()
+      expect(notifier.getPendingParentWakes().get("parent-1")?.forceQueueToken).toBeDefined()
+
+      // when: notification text dedupes, but the prompt context changes
+      notifier.queuePendingParentWake("parent-1", FINAL_WAKE, { agent: "atlas" }, true)
+
+      // then: stale callbacks from the old force-queued entry can no longer mark
+      // the wake admitted for the wrong context.
+      const updatedWake = notifier.getPendingParentWakes().get("parent-1")
+      expect(updatedWake?.forcedQueuedAt).toBeUndefined()
+      expect(updatedWake?.forceQueueToken).toBeUndefined()
+      expect(updatedWake?.promptContext).toEqual({ agent: "atlas" })
+    } finally {
+      Date.now = originalDateNow
+      notifier.shutdown()
+      releaseAllPromptAsyncReservationsForTesting()
+    }
+  })
+
+  test("#given a force-queued wake #when prompt context tools have the same values in a different key order #then the force token is preserved", async () => {
+    // given
+    const originalDateNow = Date.now
+    const now = 100_000
+    Date.now = () => now
+    const { notifier } = createNotifier({
+      sessionStatuses: { "parent-1": { type: "idle" } },
+      messagesProvider: () => SAFE_MESSAGES,
+      maxDeferMs: 5_000,
+    })
+    reserveForeignGate("parent-1", now)
+    notifier.queuePendingParentWake(
+      "parent-1",
+      FINAL_WAKE,
+      { agent: "sisyphus", tools: { bash: true, grep: true } },
+      true,
+    )
+    const wake = notifier.getPendingParentWakes().get("parent-1")
+    if (!wake) throw new Error("missing wake")
+    wake.firstDeferredAt = now - 5_001
+
+    try {
+      await notifier.flushPendingParentWake("parent-1")
+      const tokenBeforeMerge = notifier.getPendingParentWakes().get("parent-1")?.forceQueueToken
+      expect(notifier.getPendingParentWakes().get("parent-1")?.forcedQueuedAt).toBeDefined()
+      expect(tokenBeforeMerge).toBeDefined()
+
+      notifier.queuePendingParentWake(
+        "parent-1",
+        FINAL_WAKE,
+        { agent: "sisyphus", tools: { grep: true, bash: true } },
+        true,
+      )
+
+      const updatedWake = notifier.getPendingParentWakes().get("parent-1")
+      expect(updatedWake?.forcedQueuedAt).toBeDefined()
+      expect(updatedWake?.forceQueueToken).toBe(tokenBeforeMerge)
+    } finally {
+      Date.now = originalDateNow
+      notifier.shutdown()
+      releaseAllPromptAsyncReservationsForTesting()
+    }
+  })
+
   test("#given an identical dispatch is already in flight (ITEM 2) #when the force dispatch coalesces (queued without a real entry) #then forcedQueuedAt is NOT set", async () => {
     // given: a first force dispatch actually dispatches and records a recent
     // dispatch + a same-dedupe post-dispatch hold (no foreign reservation).

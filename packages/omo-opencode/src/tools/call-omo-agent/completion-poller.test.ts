@@ -83,7 +83,7 @@ describe("waitForCompletion", () => {
     const messages = mock(async () => ({
       data: [
         { info: { id: "msg-user", role: "user" } },
-        { info: { id: "msg-assistant", role: "assistant" } },
+        { info: { id: "msg-assistant", role: "assistant" }, parts: [{ type: "text", text: "done" }] },
       ],
     }))
 
@@ -97,6 +97,86 @@ describe("waitForCompletion", () => {
 
       // then
       expect(messages).toHaveBeenCalled()
+    } finally {
+      Date.now = originalDateNow
+      globalThis.setTimeout = originalSetTimeout
+    }
+  })
+
+  test("#given only the new user prompt is durable #when the session stays idle #then completion waits until timeout instead of succeeding", async () => {
+    // given
+    const originalDateNow = Date.now
+    const originalSetTimeout = globalThis.setTimeout
+    let currentTime = 0
+    Date.now = () => {
+      currentTime += 60_000
+      return currentTime
+    }
+    globalThis.setTimeout = ((handler: TimerHandler) => {
+      if (typeof handler === "function") {
+        handler()
+      }
+      return originalSetTimeout(() => {}, 0)
+    }) as typeof globalThis.setTimeout
+
+    const status = mock(async () => ({ data: { "ses-user-only": { type: "idle" } } }))
+    const messages = mock(async () => ({
+      data: [
+        { info: { id: "msg-user", role: "user" } },
+      ],
+    }))
+
+    try {
+      // when
+      const result = waitForCompletion(
+        "ses-user-only",
+        createToolContext(),
+        createContext({ status, messages }),
+      )
+
+      // then
+      await expect(result).rejects.toThrow("Agent task timed out")
+    } finally {
+      Date.now = originalDateNow
+      globalThis.setTimeout = originalSetTimeout
+    }
+  })
+
+  test("#given only an anchored assistant skeleton is durable #when the reused session stays idle #then completion waits until timeout", async () => {
+    // given
+    const originalDateNow = Date.now
+    const originalSetTimeout = globalThis.setTimeout
+    let currentTime = 0
+    Date.now = () => {
+      currentTime += 60_000
+      return currentTime
+    }
+    globalThis.setTimeout = ((handler: TimerHandler) => {
+      if (typeof handler === "function") {
+        handler()
+      }
+      return originalSetTimeout(() => {}, 0)
+    }) as typeof globalThis.setTimeout
+
+    const status = mock(async () => ({ data: { "ses-skeleton": { type: "idle" } } }))
+    const messages = mock(async () => ({
+      data: [
+        { info: { id: "msg-old", role: "assistant" }, parts: [{ type: "text", text: "old answer" }] },
+        { info: { id: "msg-skeleton", role: "assistant" }, parts: [] },
+      ],
+    }))
+
+    try {
+      // when
+      const result = waitForCompletion(
+        "ses-skeleton",
+        createToolContext(),
+        createContext({ status, messages }),
+        1,
+      )
+
+      // then
+      await expect(result).rejects.toThrow("Agent task timed out")
     } finally {
       Date.now = originalDateNow
       globalThis.setTimeout = originalSetTimeout

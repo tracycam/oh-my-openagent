@@ -58,6 +58,43 @@ export function cloneParentWake(wake: PendingParentWake): PendingParentWake {
   }
 }
 
+function parentWakeModelsEqual(
+  left: ParentWakePromptContext["model"],
+  right: ParentWakePromptContext["model"],
+): boolean {
+  if (left === undefined || right === undefined) {
+    return left === right
+  }
+  return left.providerID === right.providerID && left.modelID === right.modelID
+}
+
+function parentWakeToolsEqual(
+  left: ParentWakePromptContext["tools"],
+  right: ParentWakePromptContext["tools"],
+): boolean {
+  if (left === undefined || right === undefined) {
+    return left === right
+  }
+
+  const leftKeys = Object.keys(left).sort()
+  const rightKeys = Object.keys(right).sort()
+  if (leftKeys.length !== rightKeys.length) {
+    return false
+  }
+
+  return leftKeys.every((key, index) => key === rightKeys[index] && left[key] === right[key])
+}
+
+export function parentWakePromptContextsEqual(
+  left: ParentWakePromptContext,
+  right: ParentWakePromptContext,
+): boolean {
+  return left.agent === right.agent
+    && left.variant === right.variant
+    && parentWakeModelsEqual(left.model, right.model)
+    && parentWakeToolsEqual(left.tools, right.tools)
+}
+
 export function isRedundantParentWake(latestWake: PendingParentWake, dispatchedWake: PendingParentWake): boolean {
   return parentWakePromptContextMatches(latestWake, dispatchedWake)
     && parentWakeReplyModeIsCovered(latestWake, dispatchedWake)
@@ -90,7 +127,7 @@ export function mergeParentWakeNotifications(existingNotifications: readonly str
 }
 
 function parentWakePromptContextMatches(left: PendingParentWake, right: PendingParentWake): boolean {
-  return JSON.stringify(left.promptContext) === JSON.stringify(right.promptContext)
+  return parentWakePromptContextsEqual(left.promptContext, right.promptContext)
 }
 
 function parentWakeReplyModeIsCovered(latestWake: PendingParentWake, dispatchedWake: PendingParentWake): boolean {

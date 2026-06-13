@@ -88,7 +88,7 @@ async function probe(registration: RouteRegistration): Promise<boolean> {
     return false
   }
 
-  const probeUrl = new URL("/session", registration.serverUrl)
+  const probeUrl = new URL("/global/health", registration.serverUrl)
   const authHeader = getServerBasicAuthHeader()
   const headers: Record<string, string> = authHeader ? { Authorization: authHeader } : {}
 

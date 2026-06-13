@@ -2,6 +2,7 @@ import { log } from "../../shared"
 import {
   cloneParentWake,
   mergeParentWakeNotifications,
+  parentWakePromptContextsEqual,
   resolveParentWakePromptContext,
   type ParentWakePromptContext,
   type PendingParentWake,
@@ -54,10 +55,12 @@ export class ParentWakePendingQueue {
       const mergedNotifications = mergeParentWakeNotifications(pendingWake.notifications, notification)
       const notificationsChanged = mergedNotifications.length !== pendingWake.notifications.length
         || mergedNotifications.some((merged, index) => merged !== pendingWake.notifications[index])
+      const promptContextChanged = !parentWakePromptContextsEqual(pendingWake.promptContext, resolvedPromptContext)
+      const replyRequirementChanged = shouldReply && !pendingWake.shouldReply
       pendingWake.notifications = mergedNotifications
       pendingWake.promptContext = resolvedPromptContext
       pendingWake.shouldReply = pendingWake.shouldReply || shouldReply
-      if (notificationsChanged) {
+      if (notificationsChanged || promptContextChanged || replyRequirementChanged) {
         delete pendingWake.noReplyAdmittedAt
         delete pendingWake.noReplyAdmittedNotificationCount
         // A force-queued gate entry holds the OLD notification
@@ -111,6 +114,9 @@ export class ParentWakePendingQueue {
       this.pendingParentWakeTimers.delete(sessionID)
       void this.options.enqueueNotificationForParent(sessionID, operation).catch((error) => {
         log("[background-agent] Failed to retry pending parent wake:", { sessionID, error })
+        if (this.pendingParentWakes.has(sessionID) && !this.pendingParentWakeTimers.has(sessionID)) {
+          this.scheduleFlush(sessionID, operation)
+        }
       })
     }, delayMs ?? this.options.pendingRetryMs)
     unrefTimerHandle(timer)

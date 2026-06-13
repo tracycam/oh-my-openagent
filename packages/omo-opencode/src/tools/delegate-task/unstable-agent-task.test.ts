@@ -221,4 +221,59 @@ describe("executeUnstableAgentTask - interrupt detection", () => {
     expect(result.toLowerCase()).toContain("stale timeout")
     expect(elapsed).toBeLessThan(400)
   })
+
+  test("cancels the monitored background task when idle polling only sees empty messages", async () => {
+    //#given - the manager still thinks the task is running but OpenCode has no assistant output
+    const taskState = {
+      id: "bg_test_empty",
+      sessionId: "ses_test_empty",
+      status: "running" as string,
+      description: "test empty task",
+      prompt: "test prompt",
+      agent: "sisyphus-junior",
+      error: undefined as string | undefined,
+    }
+    const cancelTask = mock(async () => ({}))
+    const mockManager = {
+      launch: async () => taskState,
+      getTask: () => taskState,
+      cancelTask,
+    }
+    const mockClient = {
+      session: {
+        status: async () => ({ data: { [taskState.sessionId]: { type: "idle" } } }),
+        messages: async () => ({ data: [] }),
+      },
+    }
+    const { executeUnstableAgentTask } = require("./unstable-agent-task")
+
+    //#when
+    const result = await executeUnstableAgentTask(
+      {
+        prompt: "test prompt",
+        description: "test task",
+        category: "test",
+        load_skills: [],
+        run_in_background: false,
+      },
+      { sessionID: "parent-session", callID: "call-123", metadata: () => {} },
+      {
+        manager: mockManager,
+        client: mockClient,
+        directory: "/tmp",
+        syncPollTimeoutMs: 40,
+      },
+      { sessionID: "parent-session", messageID: "msg-123" },
+      "test-agent",
+      undefined,
+      undefined,
+      "test-model",
+    )
+
+    //#then
+    expect(result).toContain("SUPERVISED TASK TIMED OUT")
+    expect(cancelTask).toHaveBeenCalledWith("bg_test_empty", expect.objectContaining({
+      source: "unstable-agent-task",
+    }))
+  })
 })

@@ -12,6 +12,20 @@ import { QUESTION_DENIED_SESSION_PERMISSION } from "../../shared/question-denied
 import { resolveMetadataModel } from "./resolve-metadata-model"
 import { buildTaskMetadataBlock } from "../../features/tool-metadata-store/task-metadata-contract"
 
+function hasAssistantText(messages: readonly SessionMessage[]): boolean {
+  return messages.some((message) => {
+    if (message.info?.role !== "assistant") {
+      return false
+    }
+    return (message.parts ?? []).some((part) => {
+      if (part.type !== "text" && part.type !== "reasoning") {
+        return false
+      }
+      return (part.text ?? "").trim().length > 0
+    })
+  })
+}
+
 export async function executeUnstableAgentTask(
   args: DelegateTaskArgs,
   ctx: ToolContextWithMetadata,
@@ -135,10 +149,16 @@ export async function executeUnstableAgentTask(
       if (Date.now() - pollStart < timingCfg.MIN_STABILITY_TIME_MS) continue
 
       const messagesCheck = await client.session.messages({ path: { id: sessionID } })
-      const msgs = normalizeSDKResponse(messagesCheck, [] as Array<unknown>, {
+      const msgs = normalizeSDKResponse(messagesCheck, [] as SessionMessage[], {
         preferResponseOnMissingData: true,
       })
       const currentMsgCount = msgs.length
+
+      if (!hasAssistantText(msgs)) {
+        stablePolls = 0
+        lastMsgCount = currentMsgCount
+        continue
+      }
 
       if (currentMsgCount === lastMsgCount) {
         stablePolls++

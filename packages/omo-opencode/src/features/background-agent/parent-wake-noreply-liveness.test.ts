@@ -327,6 +327,48 @@ describe("parent wake noReply admission liveness (issues #4874/#5086)", () => {
 
     queue.shutdown()
   })
+
+  test("#given pending parent wake retry enqueue fails #when the timer fires #then the flush is re-armed", async () => {
+    // given
+    let enqueueAttempts = 0
+    let operationCalls = 0
+    let resolveSecondAttempt: (() => void) | undefined
+    const secondAttempt = new Promise<void>((resolve) => {
+      resolveSecondAttempt = resolve
+    })
+    const queue = new ParentWakePendingQueue({
+      pendingRetryMs: 1,
+      enqueueNotificationForParent: async (_sessionID, operation) => {
+        enqueueAttempts += 1
+        if (enqueueAttempts === 1) {
+          throw new Error("queue failure")
+        }
+        resolveSecondAttempt?.()
+        await operation()
+      },
+    })
+    queue.queueWake("parent-1", FINAL_WAKE, { agent: "sisyphus" }, true)
+
+    try {
+      // when
+      queue.scheduleFlush("parent-1", async () => {
+        operationCalls += 1
+      }, 1)
+      await Promise.race([
+        secondAttempt,
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error("waited 1s for re-armed pending parent wake retry")), 1_000)
+        }),
+      ])
+
+      // then
+      expect(enqueueAttempts).toBeGreaterThanOrEqual(2)
+      expect(operationCalls).toBe(1)
+      expect(queue.getTimers().has("parent-1")).toBe(false)
+    } finally {
+      queue.shutdown()
+    }
+  })
 })
 
 describe("parent wake admitted-consumption drop (duplicate ALL-COMPLETE regression)", () => {

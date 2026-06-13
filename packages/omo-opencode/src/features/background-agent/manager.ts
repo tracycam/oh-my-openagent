@@ -8,6 +8,7 @@ import {
   getQueuedPromptBlocker,
   type PromptAsyncGateResult,
 } from "../../hooks/shared/prompt-async-gate"
+import type { InternalPromptDispatchResult } from "../../shared/prompt-async-gate/types"
 import { isSessionActive as isOpenCodeSessionActive } from "../../hooks/shared/session-idle-settle"
 import { resolveDispatchClient } from "../../shared/live-server-route"
 import {
@@ -128,6 +129,21 @@ import type {
 } from "./types"
 
 type OpencodeClient = PluginInput["client"]
+
+type ParentWakePromptContextSource = Pick<
+  BackgroundTask,
+  "id" | "parentSessionId" | "parentAgent" | "parentModel" | "parentTools"
+>
+
+type QueuedResumePromptRequest = {
+  readonly id: number
+  readonly taskId: string
+  readonly parentSessionId: string
+  readonly parentMessageId: string
+  readonly parentAgent?: string
+  readonly parentModel?: { readonly providerID: string; readonly modelID: string }
+  readonly parentTools?: Record<string, boolean>
+}
 
 // Finish reasons that do NOT mean the assistant turn is done (mid tool-loop / unknown).
 // Mirrored from tools/delegate-task/sync-session-poller.ts.
@@ -327,6 +343,8 @@ export class BackgroundManager {
   private completedTaskSummaries: Map<string, BackgroundTaskNotificationTask[]> = new Map()
   private idleDeferralTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
   private notificationQueueByParent: Map<string, Promise<void>> = new Map()
+  private queuedResumeRequestIdsByTask: Map<string, Set<number>> = new Map()
+  private nextQueuedResumeRequestID = 1
   private readonly parentWakeNotifier: ParentWakeNotifier
   private parentWakeTextDeltaBuffers: Map<string, string> = new Map()
   private observedOutputSessions: Set<string> = new Set()
@@ -644,8 +662,12 @@ export class BackgroundManager {
     this.notifyResumePromptNotDelivered(task, skippedStatus)
   }
 
-  private notifyResumePromptNotDelivered(task: BackgroundTask, reason: string): void {
-    const parentSessionId = task.parentSessionId
+  private notifyResumePromptNotDeliveredForContext(
+    task: BackgroundTask,
+    parentSessionId: string,
+    contextSource: ParentWakePromptContextSource,
+    reason: string,
+  ): void {
     if (!parentSessionId) {
       return
     }
@@ -657,7 +679,7 @@ export class BackgroundManager {
 
 Your message to this background task was NOT delivered (reason: ${reason}). The task was reverted to "${revertedStatus}". Retry with task(task_id="${task.id}", prompt="...").
 </system-reminder>`
-    void this.resolveParentWakePromptContext(task)
+    void this.resolveParentWakePromptContext(contextSource)
       .then((promptContext) => {
         this.queuePendingParentWake(parentSessionId, notification, promptContext, true, PENDING_PARENT_WAKE_DEBOUNCE_MS)
       })
@@ -668,6 +690,95 @@ Your message to this background task was NOT delivered (reason: ${reason}). The 
         })
         this.queuePendingParentWake(parentSessionId, notification, {}, true, PENDING_PARENT_WAKE_DEBOUNCE_MS)
       })
+  }
+
+  private notifyResumePromptNotDelivered(task: BackgroundTask, reason: string): void {
+    this.notifyResumePromptNotDeliveredForContext(task, task.parentSessionId, task, reason)
+  }
+
+  private notifyQueuedResumePromptNotDelivered(
+    task: BackgroundTask,
+    request: QueuedResumePromptRequest,
+    reason: string,
+  ): void {
+    this.notifyResumePromptNotDeliveredForContext(
+      task,
+      request.parentSessionId,
+      {
+        id: task.id,
+        parentSessionId: request.parentSessionId,
+        parentAgent: request.parentAgent,
+        parentModel: request.parentModel,
+        parentTools: request.parentTools,
+      },
+      reason,
+    )
+  }
+
+  private createQueuedResumePromptRequest(
+    task: BackgroundTask,
+    input: ResumeInput,
+  ): QueuedResumePromptRequest {
+    return {
+      id: this.nextQueuedResumeRequestID++,
+      taskId: task.id,
+      parentSessionId: input.parentSessionId,
+      parentMessageId: input.parentMessageId,
+      ...(input.parentAgent !== undefined ? { parentAgent: input.parentAgent } : {}),
+      ...(input.parentModel !== undefined
+        ? { parentModel: { providerID: input.parentModel.providerID, modelID: input.parentModel.modelID } }
+        : {}),
+      ...(input.parentTools !== undefined ? { parentTools: { ...input.parentTools } } : {}),
+    }
+  }
+
+  private registerQueuedResumePromptRequest(request: QueuedResumePromptRequest): void {
+    const requestIds = this.queuedResumeRequestIdsByTask.get(request.taskId) ?? new Set<number>()
+    requestIds.add(request.id)
+    this.queuedResumeRequestIdsByTask.set(request.taskId, requestIds)
+  }
+
+  private settleQueuedResumePromptRequest(task: BackgroundTask, request: QueuedResumePromptRequest): boolean {
+    const requestIds = this.queuedResumeRequestIdsByTask.get(request.taskId)
+    if (!requestIds?.delete(request.id)) {
+      return false
+    }
+
+    if (requestIds.size === 0) {
+      this.queuedResumeRequestIdsByTask.delete(request.taskId)
+      return true
+    }
+
+    this.queuedResumeRequestIdsByTask.set(request.taskId, requestIds)
+    task.resumePromptDelivery = "queued"
+    return true
+  }
+
+  private markQueuedResumePromptDispatched(task: BackgroundTask, request: QueuedResumePromptRequest): void {
+    if (!this.settleQueuedResumePromptRequest(task, request)) {
+      return
+    }
+    if (!this.queuedResumeRequestIdsByTask.has(request.taskId)) {
+      task.resumePromptDelivery = "dispatched"
+    }
+  }
+
+  private handleQueuedResumePromptUndelivered(
+    task: BackgroundTask,
+    request: QueuedResumePromptRequest,
+    result: InternalPromptDispatchResult,
+  ): void {
+    if (!this.settleQueuedResumePromptRequest(task, request)) {
+      return
+    }
+    if (!this.queuedResumeRequestIdsByTask.has(request.taskId)) {
+      task.resumePromptDelivery = undefined
+    }
+    this.removePendingTaskForParent(task.id, request.parentSessionId)
+    const reason = result.status === "failed"
+      ? `queued prompt failed: ${result.error instanceof Error ? result.error.message : String(result.error)}`
+      : `queued prompt ${result.status}`
+    this.notifyQueuedResumePromptNotDelivered(task, request, reason)
   }
 
   private removeTaskFromParentIndex(taskID: string, parentSessionID: string | undefined): void {
@@ -1470,6 +1581,7 @@ The fallback retry session is now created and can be inspected directly.
       this.pendingByParent.set(input.parentSessionId, pending)
     }
 
+    const queuedRequest = this.createQueuedResumePromptRequest(task, input)
     const promptResult = await dispatchInternalPrompt({
       mode: "async",
       client: this.client,
@@ -1477,6 +1589,12 @@ The fallback retry session is now created and can be inspected directly.
       source: RESUME_QUEUED_PROMPT_SOURCE,
       settleMs: 0,
       queueBehavior: "enqueue",
+      onDispatched: () => {
+        this.markQueuedResumePromptDispatched(task, queuedRequest)
+      },
+      onExpiredOrFailed: (result) => {
+        this.handleQueuedResumePromptUndelivered(task, queuedRequest, result)
+      },
       input: this.buildResumePromptInput(task, sessionID, input.prompt),
     })
 
@@ -1498,7 +1616,13 @@ The fallback retry session is now created and can be inspected directly.
       throw new Error("promptAsync unavailable - cannot deliver message to running task")
     }
 
-    task.resumePromptDelivery = promptResult.status === "dispatched" ? "dispatched" : "queued"
+    if (promptResult.status === "queued" && promptResult.queuedEntryCreated) {
+      this.registerQueuedResumePromptRequest(queuedRequest)
+    }
+    task.resumePromptDelivery = promptResult.status === "dispatched"
+      || (promptResult.status === "queued" && !promptResult.queuedEntryCreated && !this.queuedResumeRequestIdsByTask.has(task.id))
+      ? "dispatched"
+      : "queued"
     log("[background-agent] Resume prompt delivery for running task:", {
       taskId: task.id,
       sessionID,
@@ -2535,12 +2659,16 @@ The task was re-queued on a fallback model after a retryable failure.
    * Cleans up the parent entry if no pending tasks remain.
    */
   private cleanupPendingByParent(task: BackgroundTask): void {
-    if (!task.parentSessionId) return
-    const pending = this.pendingByParent.get(task.parentSessionId)
+    this.removePendingTaskForParent(task.id, task.parentSessionId)
+  }
+
+  private removePendingTaskForParent(taskId: string, parentSessionId: string | undefined): void {
+    if (!parentSessionId) return
+    const pending = this.pendingByParent.get(parentSessionId)
     if (pending) {
-      pending.delete(task.id)
+      pending.delete(taskId)
       if (pending.size === 0) {
-        this.pendingByParent.delete(task.parentSessionId)
+        this.pendingByParent.delete(parentSessionId)
       }
     }
   }
@@ -3107,9 +3235,9 @@ The task was re-queued on a fallback model after a retryable failure.
     }
   }
 
-  private async resolveParentWakePromptContext(task: BackgroundTask): Promise<ParentWakePromptContext> {
+  private async resolveParentWakePromptContext(task: ParentWakePromptContextSource): Promise<ParentWakePromptContext> {
     let agent: string | undefined = task.parentAgent
-    let model: { providerID: string; modelID: string } | undefined
+    let model: { providerID: string; modelID: string } | undefined = task.parentModel
     let tools: Record<string, boolean> | undefined = task.parentTools
     let variant: string | undefined
 

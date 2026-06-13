@@ -218,6 +218,53 @@ describe("ParentWakeNotifier late error recovery", () => {
     }
   })
 
+  test("#given assistant skeleton history has no parts #when late session.error arrives #then the wake is requeued", async () => {
+    // given
+    const sessionMessages: SessionMessageStub[] = [
+      {
+        info: {
+          role: "assistant",
+          finish: "stop",
+          time: { created: 500 },
+        },
+      },
+    ]
+    const { notifier, promptAsyncCalls } = createNotifier({
+      sessionMessagesImpl: async () => ({ data: sessionMessages }),
+    })
+    const sessionID = "parent-late-error-assistant-skeleton-history"
+    notifier.queuePendingParentWake(sessionID, FINAL_WAKE, { agent: "sisyphus" }, true)
+
+    try {
+      await notifier.flushPendingParentWake(sessionID)
+      expect(promptAsyncCalls).toHaveLength(1)
+      const wake = notifier.getDispatchedParentWakes().get(sessionID)
+      if (!wake) {
+        throw new Error("Missing dispatched parent wake")
+      }
+      wake.dispatchedAt = 1_000
+      sessionMessages.push({
+        info: {
+          role: "assistant",
+          finish: "stop",
+          time: { created: 2_000 },
+        },
+      })
+
+      // when
+      const requeued = await notifier.requeueDispatchedParentWake(sessionID, "late session.error")
+
+      // then
+      expect(requeued).toBe(true)
+      expect(promptAsyncCalls).toHaveLength(1)
+      expect(notifier.getPendingParentWakes().get(sessionID)?.notifications).toEqual([FINAL_WAKE])
+      expect(notifier.getDispatchedParentWakes().has(sessionID)).toBe(false)
+    } finally {
+      notifier.shutdown()
+      releaseAllPromptAsyncReservationsForTesting()
+    }
+  })
+
   test("#given assistant output appears after the recovery window #when the wake timer inspects history #then the dispatched wake is cleared", async () => {
     // given
     let showAcceptedAssistantOutput = false
@@ -232,7 +279,10 @@ describe("ParentWakeNotifier late error recovery", () => {
             },
           },
           ...(showAcceptedAssistantOutput
-            ? [{ info: { role: "assistant", finish: "stop", time: { created: Date.now() } } }]
+            ? [{
+                info: { role: "assistant", finish: "stop", time: { created: Date.now() } },
+                parts: [{ type: "text", text: "accepted wake" }],
+              }]
             : []),
         ] satisfies readonly SessionMessageStub[],
       }),
@@ -274,7 +324,12 @@ describe("ParentWakeNotifier late error recovery", () => {
                 time: { created: Date.now() - 10_000 },
               },
             },
-            ...(attempt >= 3 ? [{ info: { role: "assistant", finish: "stop", time: { created: Date.now() } } }] : []),
+            ...(attempt >= 3
+              ? [{
+                  info: { role: "assistant", finish: "stop", time: { created: Date.now() } },
+                  parts: [{ type: "text", text: "accepted wake" }],
+                }]
+              : []),
           ] satisfies readonly SessionMessageStub[],
         }
       },

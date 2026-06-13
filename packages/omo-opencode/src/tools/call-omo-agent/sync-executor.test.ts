@@ -85,6 +85,7 @@ function createToolContext(): ToolContext {
 function createContext(
   promptAsync: ReturnType<typeof mock>,
   status?: () => Promise<unknown>,
+  messages?: () => Promise<unknown>,
 ) {
   return {
     client: {
@@ -92,6 +93,7 @@ function createContext(
         prompt: promptAsync,
         promptAsync,
         ...(status ? { status } : {}),
+        ...(messages ? { messages } : {}),
       },
     },
   }
@@ -576,6 +578,51 @@ describe("executeSync", () => {
     expect(recorder.promptAsync).toHaveBeenCalledTimes(1)
     expect(deps.waitForCompletion).toHaveBeenCalledTimes(1)
     expect(deps.processMessages).toHaveBeenCalledTimes(1)
+  })
+
+  test("#given a reused sync session has old messages #when executeSync sends a continuation #then completion and processing use a pre-dispatch anchor", async () => {
+    //#given
+    const executeSync = await importExecuteSync()
+    const deps = createDependencies({
+      createOrGetSession: mock(async () => ({ sessionID: "ses-reuse-anchor", isNew: false })),
+    })
+    const toolContext = createToolContext()
+    const recorder = createPromptAsyncRecorder()
+    const messages = mock(async () => ({
+      data: [
+        { info: { id: "msg-old-user", role: "user" } },
+        {
+          info: {
+            id: "msg-old-assistant",
+            role: "assistant",
+            finish: "stop",
+            time: { completed: 1 },
+          },
+          parts: [{ type: "text", text: "old output" }],
+        },
+      ],
+    }))
+    const args = {
+      subagent_type: "explore",
+      description: "reuse anchor",
+      prompt: "continue with fresh context",
+      run_in_background: false,
+      session_id: "ses-reuse-anchor",
+    }
+
+    //#when
+    await executeSync(args, toolContext, createContext(recorder.promptAsync, undefined, messages) as never, deps)
+
+    //#then
+    expect(messages.mock.calls.length).toBeGreaterThanOrEqual(1)
+    expect(messages.mock.calls[0]?.[0]).toEqual({ path: { id: "ses-reuse-anchor" } })
+    expect(deps.waitForCompletion).toHaveBeenCalledWith(
+      "ses-reuse-anchor",
+      toolContext,
+      expect.objectContaining({ client: expect.anything() }),
+      2,
+    )
+    expect(deps.processMessages).toHaveBeenCalledWith("ses-reuse-anchor", expect.anything(), 2)
   })
 
   test("commits reserved descendant quota after creating a new sync session", async () => {

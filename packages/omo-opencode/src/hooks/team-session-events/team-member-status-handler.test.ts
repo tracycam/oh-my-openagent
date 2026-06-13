@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, test } from "bun:test"
 import { randomUUID } from "node:crypto"
-import { mkdtemp, mkdir, rm } from "node:fs/promises"
+import { mkdtemp, mkdir, readdir, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
@@ -12,6 +12,8 @@ import {
   clearTeamSessionRegistry,
   registerTeamSession,
 } from "../../features/team-mode/team-session-registry"
+import { sendMessage } from "../../features/team-mode/team-mailbox/send"
+import { getInboxDir, resolveBaseDir } from "../../features/team-mode/team-registry/paths"
 import type { RuntimeState, RuntimeStateMember } from "../../features/team-mode/types"
 import { loadRuntimeState, saveRuntimeState } from "../../features/team-mode/team-state-store/store"
 import { createTeamMemberStatusHandler } from "./team-member-status-handler"
@@ -151,6 +153,43 @@ describe("createTeamMemberStatusHandler", () => {
     // then
     const runtimeState = await loadRuntimeState(teamRunId, config)
     expect(runtimeState.members[0]?.status).toBe("completed")
+  })
+
+  test("requeues pending live deliveries when a member session is deleted before idle ack", async () => {
+    // given
+    const baseDir = await createTemporaryBaseDir()
+    const config = createConfig(baseDir)
+    const teamRunId = randomUUID()
+    await seedRuntimeState(createRuntimeState(
+      teamRunId,
+      buildMember({ status: "running", pendingInjectedMessageIds: ["msg-pending"] }),
+    ), config)
+    await sendMessage({
+      version: 1,
+      messageId: "msg-pending",
+      from: "lead",
+      to: "worker",
+      kind: "message",
+      body: "pending live delivery",
+      timestamp: 1,
+    }, teamRunId, config, {
+      isLead: true,
+      activeMembers: ["worker"],
+      reservedRecipients: new Set(["worker"]),
+    })
+    const handler = createTeamMemberStatusHandler(config)
+
+    // when
+    await handler({ event: { type: "session.deleted", properties: { info: { id: "member-session" } } } })
+
+    // then
+    const runtimeState = await loadRuntimeState(teamRunId, config)
+    expect(runtimeState.members[0]?.status).toBe("completed")
+    expect(runtimeState.members[0]?.pendingInjectedMessageIds).toEqual([])
+    const inboxDir = getInboxDir(resolveBaseDir(config), teamRunId, "worker")
+    const inboxEntries = await readdir(inboxDir)
+    expect(inboxEntries).toContain("msg-pending.json")
+    expect(inboxEntries).not.toContain(".delivering-msg-pending.json")
   })
 
   test("preserves a terminal errored status even when the session is deleted", async () => {

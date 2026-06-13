@@ -268,7 +268,7 @@ function parentWakeMessageHasOutput(message: ParentWakeSessionMessage): boolean 
     return false
   }
   if (!message.parts || message.parts.length === 0) {
-    return role === "assistant"
+    return role === "tool"
   }
   return message.parts.some((part) => {
     if (part.type === "text" || part.type === "reasoning") {

@@ -7,6 +7,7 @@ import {
   getDelegatedChildSessionBootstrap,
 } from "../../shared/delegated-child-session-bootstrap"
 import { dispatchInternalPrompt, releaseAllPromptAsyncReservationsForTesting } from "../../shared/prompt-async-gate"
+import { schedulePromptQueueDrain } from "../../shared/prompt-async-gate/queue"
 import { clearSessionPromptParams, getSessionPromptParams } from "../../shared/session-prompt-params-state"
 import {
   getSessionAgent,
@@ -3121,6 +3122,162 @@ describe("BackgroundManager.resume queued delivery for running task", () => {
     expect(task.status).toBe("completed")
 
     manager.shutdown()
+  })
+
+  test("notifies the parent and clears queued delivery when a running resume prompt expires", async () => {
+    //#given - busy session keeps the resume prompt queued past its TTL
+    const originalDateNow = Date.now
+    let now = 0
+    Date.now = () => now
+    const client = {
+      session: {
+        status: async () => ({
+          data: { "session-running-expired": { type: "busy" } },
+        }),
+        messages: async () => ({ data: [] }),
+        promptAsync: async () => ({}),
+        abort: async () => ({}),
+      },
+    }
+    const manager = new BackgroundManager({ pluginContext: createPluginInput(client) })
+    stubNotifyParentSession(manager)
+    const task = createRunningTask("session-running-expired")
+    getTaskMap(manager).set(task.id, task)
+    const queuePendingParentWake = mock(() => {})
+    ;(cast<{
+      queuePendingParentWake: (
+        sessionId: string,
+        notification: string,
+        promptContext: Record<string, unknown>,
+        shouldReply: boolean,
+        delayMs?: number,
+      ) => void
+    }>(manager)).queuePendingParentWake = queuePendingParentWake
+
+    try {
+      await manager.resume({
+        sessionId: "session-running-expired",
+        prompt: "mid-turn user update",
+        parentSessionId: "parent-new",
+        parentMessageId: "msg-new",
+      })
+      expect(task.resumePromptDelivery).toBe("queued")
+
+      //#when - the queued prompt expires in the async gate
+      now = 5 * 60_000 + 1
+      schedulePromptQueueDrain("session-running-expired", 0)
+      await waitUntil(() => queuePendingParentWake.mock.calls.length > 0, 1_000)
+
+      //#then - the user is told the message was not delivered and the queued marker is cleared
+      expect(task.resumePromptDelivery).toBeUndefined()
+      expect(getPendingByParent(manager).has("parent-new")).toBe(false)
+      const wakeCall = cast<Array<[string, string, Record<string, unknown>, boolean]>>(
+        queuePendingParentWake.mock.calls,
+      )[0]
+      if (!wakeCall) {
+        throw new Error("Expected an undelivered queued-resume parent wake call")
+      }
+      const [sessionID, notification, , shouldReply] = wakeCall
+      expect(sessionID).toBe("parent-new")
+      expect(notification).toContain("NOT delivered")
+      expect(notification).toContain(task.id)
+      expect(shouldReply).toBe(true)
+    } finally {
+      Date.now = originalDateNow
+      manager.shutdown()
+    }
+  })
+
+  test("keeps queued resume expiry bound to each request parent when multiple running resumes are queued", async () => {
+    //#given - two queued resume prompts target the same busy task from different parents
+    const originalDateNow = Date.now
+    let now = 0
+    Date.now = () => now
+    const client = {
+      session: {
+        status: async () => ({
+          data: { "session-running-multi-expired": { type: "busy" } },
+        }),
+        messages: async () => ({ data: [] }),
+        promptAsync: async () => ({}),
+        abort: async () => ({}),
+      },
+    }
+    const manager = new BackgroundManager({ pluginContext: createPluginInput(client) })
+    stubNotifyParentSession(manager)
+    const task = createRunningTask("session-running-multi-expired")
+    getTaskMap(manager).set(task.id, task)
+    const queuePendingParentWake = mock(() => {})
+    ;(cast<{
+      queuePendingParentWake: (
+        sessionId: string,
+        notification: string,
+        promptContext: Record<string, unknown>,
+        shouldReply: boolean,
+        delayMs?: number,
+      ) => void
+    }>(manager)).queuePendingParentWake = queuePendingParentWake
+
+    async function waitForWakeCalls(expectedCallCount: number): Promise<void> {
+      for (let attempt = 0; attempt < 50; attempt++) {
+        if (queuePendingParentWake.mock.calls.length >= expectedCallCount) {
+          return
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      throw new Error(`Expected ${expectedCallCount} queued-resume wake calls`)
+    }
+
+    try {
+      await manager.resume({
+        sessionId: "session-running-multi-expired",
+        prompt: "first queued update",
+        parentSessionId: "parent-a",
+        parentMessageId: "msg-a",
+      })
+      now = 1_000
+      await manager.resume({
+        sessionId: "session-running-multi-expired",
+        prompt: "second queued update",
+        parentSessionId: "parent-b",
+        parentMessageId: "msg-b",
+      })
+      expect(task.resumePromptDelivery).toBe("queued")
+      expect(getPendingByParent(manager).get("parent-a")?.has(task.id)).toBe(true)
+      expect(getPendingByParent(manager).get("parent-b")?.has(task.id)).toBe(true)
+
+      //#when - only the first queued prompt is old enough to expire
+      now = 5 * 60_000 + 1
+      schedulePromptQueueDrain("session-running-multi-expired", 0)
+      await waitForWakeCalls(1)
+
+      //#then - parent-a is notified, while parent-b remains pending and keeps the delivery marker
+      expect(task.resumePromptDelivery).toBe("queued")
+      expect(getPendingByParent(manager).has("parent-a")).toBe(false)
+      expect(getPendingByParent(manager).get("parent-b")?.has(task.id)).toBe(true)
+      const firstWakeCall = cast<Array<[string, string, Record<string, unknown>, boolean]>>(
+        queuePendingParentWake.mock.calls,
+      )[0]
+      expect(firstWakeCall?.[0]).toBe("parent-a")
+      expect(firstWakeCall?.[1]).toContain("NOT delivered")
+
+      //#when - the second queued prompt expires later
+      now = 5 * 60_000 + 1_001
+      schedulePromptQueueDrain("session-running-multi-expired", 0)
+      await waitForWakeCalls(2)
+
+      //#then - parent-b receives its own notification and the final queued marker clears
+      expect(task.resumePromptDelivery).toBeUndefined()
+      expect(getPendingByParent(manager).has("parent-b")).toBe(false)
+      const secondWakeCall = cast<Array<[string, string, Record<string, unknown>, boolean]>>(
+        queuePendingParentWake.mock.calls,
+      )[1]
+      expect(secondWakeCall?.[0]).toBe("parent-b")
+      expect(secondWakeCall?.[1]).toContain("NOT delivered")
+    } finally {
+      Date.now = originalDateNow
+      manager.shutdown()
+    }
   })
 
   test("rejects when promptAsync is unavailable for a running task", async () => {

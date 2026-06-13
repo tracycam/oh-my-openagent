@@ -103,6 +103,75 @@ describe("pollSyncSession", () => {
       expect(result).toContain("Poll inactivity timeout reached")
     })
 
+    test("does not complete an anchored continuation from stale assistant text before the new user turn is answered", async () => {
+      // given: the old assistant has text but no finish, then a new user prompt is appended after the anchor
+      const { pollSyncSession } = require("./sync-session-poller")
+      const mockClient = {
+        session: {
+          messages: async () => ({
+            data: [
+              { info: { id: "msg_001", role: "user", time: { created: 1000 } } },
+              {
+                info: { id: "msg_002", role: "assistant", time: { created: 2000 } },
+                parts: [{ type: "text", text: "old answer" }],
+              },
+              { info: { id: "msg_003", role: "user", time: { created: 3000 } } },
+            ],
+          }),
+          status: async () => ({ data: { "ses_anchor_stale": { type: "idle" } } }),
+          abort: async () => ({}),
+        },
+      }
+
+      // when
+      const result = await pollSyncSession(createMockCtx(), mockClient, {
+        sessionID: "ses_anchor_stale",
+        agentToUse: "test-agent",
+        toastManager: null,
+        taskId: undefined,
+        anchorMessageCount: 2,
+      }, 50)
+
+      // then
+      expect(result).toContain("Poll inactivity timeout reached")
+    })
+
+    test("completes an anchored continuation when the post-anchor assistant turn is terminal even if the user prompt is not listed", async () => {
+      // given
+      const { pollSyncSession } = require("./sync-session-poller")
+      const mockClient = {
+        session: {
+          messages: async () => ({
+            data: [
+              { info: { id: "msg_001", role: "user", time: { created: 1000 } } },
+              {
+                info: { id: "msg_002", role: "assistant", time: { created: 2000 }, finish: "end_turn" },
+                parts: [{ type: "text", text: "old answer" }],
+              },
+              {
+                info: { id: "msg_003", role: "assistant", time: { created: 3000 }, finish: "end_turn" },
+                parts: [{ type: "text", text: "fresh continuation" }],
+              },
+            ],
+          }),
+          status: async () => ({ data: { "ses_anchor_assistant_only": { type: "idle" } } }),
+          abort: async () => ({}),
+        },
+      }
+
+      // when
+      const result = await pollSyncSession(createMockCtx(), mockClient, {
+        sessionID: "ses_anchor_assistant_only",
+        agentToUse: "test-agent",
+        toastManager: null,
+        taskId: undefined,
+        anchorMessageCount: 2,
+      }, 50)
+
+      // then
+      expect(result).toBeNull()
+    })
+
     test("detects completion when assistant message has terminal finish reason", async () => {
       // given: terminal assistant finish with assistant id > user id
       const { pollSyncSession } = require("./sync-session-poller")
@@ -910,6 +979,45 @@ describe("pollSyncSession", () => {
       expect(result).toContain("ses_frozen")
       expect(aborted).toBe(1)
       expect(nudged).toBe(0)
+    })
+
+    test("#given a reused session is busy with only pre-anchor assistant output #when mid-turn stall checking runs #then stale pre-anchor output is ignored", async () => {
+      const { pollSyncSession } = require("./sync-session-poller")
+      let polls = 0
+      let aborted = 0
+      const mockClient = {
+        session: {
+          status: async () => {
+            polls++
+            return { data: { ses_anchor_busy: { type: polls < 3 ? "busy" : "idle" } } }
+          },
+          messages: async () => ({
+            data: polls < 3
+              ? [
+                  { info: { id: "msg_001", role: "user", time: { created: 1000 } } },
+                  { info: { id: "msg_002", role: "assistant", time: { created: 2000 } }, parts: [{ type: "reasoning", id: "old", text: "" }] },
+                ]
+              : [
+                  { info: { id: "msg_001", role: "user", time: { created: 1000 } } },
+                  { info: { id: "msg_002", role: "assistant", time: { created: 2000 } }, parts: [{ type: "reasoning", id: "old", text: "" }] },
+                  { info: { id: "msg_003", role: "assistant", time: { created: 3000 }, finish: "stop" }, parts: [{ type: "text", text: "fresh continuation" }] },
+                ],
+          }),
+          abort: async () => { aborted++ },
+        },
+      }
+
+      const result = await pollSyncSession(createMockCtx(), mockClient, {
+        sessionID: "ses_anchor_busy",
+        agentToUse: "oracle",
+        toastManager: null,
+        taskId: undefined,
+        anchorMessageCount: 2,
+        midTurnStallGraceMs: 0,
+      }, 5000)
+
+      expect(result).toBeNull()
+      expect(aborted).toBe(0)
     })
 
     test("#given a busy session whose reasoning part keeps growing #when polled #then it is never mid-turn aborted and completes normally once idle", async () => {

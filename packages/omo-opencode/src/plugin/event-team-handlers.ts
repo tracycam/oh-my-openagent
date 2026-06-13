@@ -20,7 +20,7 @@ export function createEventTeamHandlers(args: {
     ? createTeamMemberErrorHandler(teamModeConfig, { client: args.pluginContext.client })
     : undefined;
   const teamMemberStatusHandler = teamModeConfig
-    ? createTeamMemberStatusHandler(teamModeConfig)
+    ? createTeamMemberStatusHandler(teamModeConfig, { client: args.pluginContext.client })
     : undefined;
   const teamIdleWakeHint = teamModeConfig
     ? createTeamIdleWakeHint({
