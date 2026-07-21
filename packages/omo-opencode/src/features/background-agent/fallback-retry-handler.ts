@@ -174,18 +174,12 @@ export async function tryFallbackRetry(args: {
   }
 
   task.queuedAt = new Date()
-  task.retryNotification = {
-    previousSessionID,
-    failedModel: previousModel ? `${previousModel.providerID}/${previousModel.modelID}` : undefined,
-    failedError: errorInfo.message,
-    nextModel: `${providerID}/${transformedModelId}`,
-  }
 
   onRetrying?.({
     task,
     source,
     previousSessionID,
-    failedModel: task.retryNotification.failedModel,
+    failedModel: previousModel ? `${previousModel.providerID}/${previousModel.modelID}` : undefined,
     failedError: errorInfo.message,
     nextModel: `${providerID}/${transformedModelId}`,
   })

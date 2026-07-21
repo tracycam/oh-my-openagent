@@ -29,28 +29,18 @@ const TERMINAL_TASK_STATUSES = new Set<BackgroundTask["status"]>([
   "interrupt",
 ])
 
-export function pruneStaleTasksAndNotifications(args: {
+export function pruneStaleTasks(args: {
   tasks: Map<string, BackgroundTask>
-  notifications: Map<string, BackgroundTask[]>
   onTaskPruned: (taskId: string, task: BackgroundTask, errorMessage: string) => void
   taskTtlMs?: number
   sessionStatuses?: SessionStatusMap
 }): void {
-  const { tasks, notifications, onTaskPruned } = args
+  const { tasks, onTaskPruned } = args
   const effectiveTtl = args.taskTtlMs ?? TASK_TTL_MS
   const now = Date.now()
-  const tasksWithPendingNotifications = new Set<string>()
-
-  for (const queued of notifications.values()) {
-    for (const task of queued) {
-      tasksWithPendingNotifications.add(task.id)
-    }
-  }
 
   for (const [taskId, task] of tasks.entries()) {
     if (TERMINAL_TASK_STATUSES.has(task.status)) {
-      if (tasksWithPendingNotifications.has(taskId)) continue
-
       const completedAt = task.completedAt?.getTime()
       if (!completedAt) continue
 
@@ -91,24 +81,6 @@ export function pruneStaleTasksAndNotifications(args: {
     onTaskPruned(taskId, task, errorMessage)
   }
 
-  for (const [sessionID, queued] of notifications.entries()) {
-    if (queued.length === 0) {
-      notifications.delete(sessionID)
-      continue
-    }
-
-    const validNotifications = queued.filter((task) => {
-      if (!task.startedAt) return false
-      const age = now - task.startedAt.getTime()
-      return age <= effectiveTtl
-    })
-
-    if (validNotifications.length === 0) {
-      notifications.delete(sessionID)
-    } else if (validNotifications.length !== queued.length) {
-      notifications.set(sessionID, validNotifications)
-    }
-  }
 }
 
 export type SessionStatusMap = Record<string, { type: string }>

@@ -5,7 +5,6 @@ import { afterEach, describe, expect, test } from "bun:test"
 import type { PluginInput } from "@opencode-ai/plugin"
 import { BackgroundManager } from "./manager"
 import type { BackgroundTask } from "./types"
-import { releaseAllPromptAsyncReservationsForTesting } from "../../hooks/shared/prompt-async-gate"
 
 type PromptAsyncCall = {
   path: { id: string }
@@ -15,16 +14,10 @@ type PromptAsyncCall = {
   }
 }
 
-type PendingParentWakeForTest = {
-  notifications: string[]
-  shouldReply: boolean
-}
-
 let managerUnderTest: BackgroundManager | undefined
 
 afterEach(() => {
   managerUnderTest?.shutdown()
-  releaseAllPromptAsyncReservationsForTesting()
   managerUnderTest = undefined
 })
 
@@ -93,31 +86,19 @@ function getPendingByParent(manager: BackgroundManager): Map<string, Set<string>
   return Reflect.get(manager, "pendingByParent") as Map<string, Set<string>>
 }
 
-function getPendingParentWakes(manager: BackgroundManager): Map<string, PendingParentWakeForTest> {
-  const parentWakeNotifier = Reflect.get(manager, "parentWakeNotifier") as {
-    getPendingParentWakes: () => Map<string, PendingParentWakeForTest>
-  }
-  return parentWakeNotifier.getPendingParentWakes()
-}
-
 async function notifyParentSessionForTest(manager: BackgroundManager, task: BackgroundTask): Promise<void> {
   const notifyParentSession = Reflect.get(manager, "notifyParentSession") as (task: BackgroundTask) => Promise<void>
   return notifyParentSession.call(manager, task)
 }
 
-async function flushPendingParentWakeForTest(manager: BackgroundManager, sessionID: string): Promise<void> {
-  const flushPendingParentWake = Reflect.get(manager, "flushPendingParentWake") as (sessionID: string) => Promise<void>
-  return flushPendingParentWake.call(manager, sessionID)
-}
-
 async function flushMicrotasks(): Promise<void> {
-  for (let index = 0; index < 5; index++) {
+  for (let index = 0; index < 20; index++) {
     await Promise.resolve()
   }
 }
 
-describe("BackgroundManager subagent failure parent isolation", () => {
-  test("#given nested background wake prompt errors in a subagent session #when the subagent is also a parent task #then the main session is not notified or cancelled", async () => {
+describe("BackgroundManager nested completion error propagation", () => {
+  test("a terminal error after a nested completion follows the ordinary subagent failure path", async () => {
     // given
     const { manager, promptAsyncCalls } = createManager()
     managerUnderTest = manager
@@ -139,7 +120,6 @@ describe("BackgroundManager subagent failure parent isolation", () => {
     getTasks(manager).set(outerTask.id, outerTask)
     getPendingByParent(manager).set(nestedFailure.parentSessionId, new Set([nestedFailure.id]))
     await notifyParentSessionForTest(manager, nestedFailure)
-    await flushPendingParentWakeForTest(manager, "subagent-session")
 
     // when
     manager.handleEvent({
@@ -152,10 +132,12 @@ describe("BackgroundManager subagent failure parent isolation", () => {
     await flushMicrotasks()
 
     // then
-    expect(promptAsyncCalls).toHaveLength(1)
+    expect(promptAsyncCalls).toHaveLength(2)
     expect(promptAsyncCalls[0]?.path.id).toBe("subagent-session")
-    expect(JSON.stringify(promptAsyncCalls[0]?.body.parts)).toContain("[ALL BACKGROUND TASKS FINISHED - 1 FAILED]")
-    expect(outerTask.status).toBe("running")
-    expect(getPendingParentWakes(manager).has("main-session")).toBe(false)
+    expect(promptAsyncCalls[0]?.body.noReply).toBe(false)
+    expect(JSON.stringify(promptAsyncCalls[0]?.body.parts)).toContain("[ALL BACKGROUND TASKS FINISHED]")
+    expect(outerTask.status).toBe("error")
+    expect(promptAsyncCalls[1]?.path.id).toBe("main-session")
+    expect(promptAsyncCalls[1]?.body.noReply).toBe(false)
   })
 })

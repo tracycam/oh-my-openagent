@@ -176,22 +176,3 @@ export function isInternalInitiatorTextPart(partInfo: MessagePartInfo | undefine
   const text = partInfo.text ?? partInfo.delta
   return typeof text === "string" && hasInternalInitiatorMarker(text)
 }
-
-export function hasParentWakeOutputSignalFromPart(partInfo: MessagePartInfo | undefined, sessionID?: string): boolean {
-  if (!hasOutputSignalFromPart(partInfo, sessionID)) {
-    return false
-  }
-  if (!partInfo) {
-    return false
-  }
-  if (partInfo.role === "user") {
-    return false
-  }
-  if (partInfo.synthetic === true) {
-    return false
-  }
-  if (isInternalInitiatorTextPart(partInfo, sessionID)) {
-    return false
-  }
-  return true
-}

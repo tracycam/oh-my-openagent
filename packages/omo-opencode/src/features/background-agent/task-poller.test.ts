@@ -1,7 +1,10 @@
 declare const require: (name: string) => any
 const { describe, it, expect, mock, spyOn, beforeEach, afterEach } = require("bun:test")
 
-import { checkAndInterruptStaleTasks, pruneStaleTasksAndNotifications } from "./task-poller"
+import {
+  checkAndInterruptStaleTasks,
+  pruneStaleTasks as pruneStaleTasksAndNotifications,
+} from "./task-poller"
 import type { BackgroundTask } from "./types"
 
 describe("checkAndInterruptStaleTasks", () => {
@@ -1207,23 +1210,21 @@ describe("pruneStaleTasksAndNotifications", () => {
     expect(Array.from(tasks.keys())).toEqual([])
   })
 
-  it("should keep terminal tasks with pending notifications until notification cleanup", () => {
+  it("should prune expired terminal tasks without notification-side retention", () => {
     //#given
     const task = createTerminalTask()
     const tasks = new Map<string, BackgroundTask>([[task.id, task]])
-    const notifications = new Map<string, BackgroundTask[]>([[task.parentSessionId, [task]]])
     const pruned: string[] = []
 
     //#when
     pruneStaleTasksAndNotifications({
       tasks,
-      notifications,
+      notifications: new Map<string, BackgroundTask[]>(),
       onTaskPruned: (taskId) => pruned.push(taskId),
     })
 
     //#then
     expect(pruned).toEqual([])
-    expect(tasks.has(task.id)).toBe(true)
-    expect(notifications.has(task.parentSessionId)).toBe(false)
+    expect(tasks.has(task.id)).toBe(false)
   })
 })

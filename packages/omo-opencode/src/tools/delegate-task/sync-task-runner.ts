@@ -87,7 +87,6 @@ export async function runSyncTaskLoop(input: SyncTaskRunnerInput): Promise<strin
   } = input
   const { client, directory, sisyphusAgentConfig } = executorCtx
   const hasActiveChildBackgroundTasks = executorCtx.manager?.hasActiveChildTasks?.bind(executorCtx.manager)
-  const hasPendingParentWake = executorCtx.manager?.hasPendingParentWake?.bind(executorCtx.manager)
   const deliverableTag = getDeliverableTag(agentToUse)
   let effectiveCategoryModel = input.categoryModel
   let fallbackState: ModelFallbackState | undefined = effectiveCategoryModel && fallbackChain?.length
@@ -149,7 +148,6 @@ export async function runSyncTaskLoop(input: SyncTaskRunnerInput): Promise<strin
       toastManager,
       taskId,
       hasActiveChildBackgroundTasks,
-      hasPendingParentWake,
     }, syncPollTimeoutMs)
     if (pollError) {
       if (shouldAttemptPollErrorRecovery(pollError)) {

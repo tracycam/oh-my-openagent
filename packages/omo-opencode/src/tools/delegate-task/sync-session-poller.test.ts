@@ -728,11 +728,7 @@ describe("pollSyncSession", () => {
       expect(childCheck).toBeGreaterThanOrEqual(3)
     })
 
-    test("keeps waiting while a parent wake is pending even after children clear", async () => {
-      // Regression: children finish, but the parent-wake notification (debounce +
-      // queue + promptAsync gate) has not yet produced the continuation turn. With a
-      // tiny settle window, the loop must still wait on hasPendingParentWake rather
-      // than returning the pre-results turn.
+    test("uses only the bounded settle window after children clear", async () => {
       const { pollSyncSession } = require("./sync-session-poller")
       let wakePolls = 0
       const synthesizedMessages = {
@@ -747,8 +743,10 @@ describe("pollSyncSession", () => {
       }
       const mockClient = {
         session: {
-          // The continuation turn lands as the dispatched wake is consumed.
-          messages: async () => (wakePolls >= 2 ? synthesizedMessages : completeMessages),
+          messages: async () => {
+            wakePolls++
+            return wakePolls >= 2 ? synthesizedMessages : completeMessages
+          },
           status: async () => ({ data: { ses_test: { type: "idle" } } }),
         },
       }
@@ -760,15 +758,10 @@ describe("pollSyncSession", () => {
         taskId: undefined,
         childWakeGraceMs: 1,
         hasActiveChildBackgroundTasks: () => false,
-        hasPendingParentWake: () => {
-          wakePolls++
-          return wakePolls < 3
-        },
       })
 
       expect(result).toBeNull()
-      // Without the wake gate the loop would have broken on the very first poll.
-      expect(wakePolls).toBeGreaterThanOrEqual(3)
+      expect(wakePolls).toBeGreaterThanOrEqual(1)
     })
 
     test("times out when direct child background tasks never finish", async () => {

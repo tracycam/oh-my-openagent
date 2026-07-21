@@ -80,14 +80,6 @@ export interface BackgroundTask {
   /** Category used for this task (e.g., 'quick', 'visual-engineering') */
   category?: string
   onSessionCreated?: (sessionId: string) => void | Promise<void>
-  /** Pending retry notification details for the next spawned retry session */
-  retryNotification?: {
-    previousSessionID?: string
-    failedModel?: string
-    failedError?: string
-    nextModel: string
-  }
-
   /** Structured attempt history for retry observability */
   attempts?: BackgroundTaskAttempt[]
   /** ID of the currently active attempt */

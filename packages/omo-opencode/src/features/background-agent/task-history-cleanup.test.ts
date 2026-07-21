@@ -56,8 +56,8 @@ function getTaskMap(manager: BackgroundManager): Map<string, BackgroundTask> {
 }
 
 function pruneStaleTasksAndNotificationsForTest(manager: BackgroundManager): void {
-  const pruneStaleTasksAndNotifications = Reflect.get(manager, "pruneStaleTasksAndNotifications") as () => void
-  pruneStaleTasksAndNotifications.call(manager)
+  const pruneStaleTasks = Reflect.get(manager, "pruneStaleTasks") as () => void
+  pruneStaleTasks.call(manager)
 }
 
 describe("task history cleanup", () => {
@@ -112,7 +112,7 @@ describe("task history cleanup", () => {
     managerUnderTest = undefined
   })
 
-  test("#given BackgroundManager with stale tasks for one parent #when pruneStaleTasksAndNotifications() runs #then history is preserved until delayed cleanup", () => {
+  test("#given BackgroundManager with stale tasks for one parent #when pruneStaleTasks() runs #then history is preserved until delayed cleanup", () => {
     // given
     const manager = createManager()
     managerUnderTest = manager

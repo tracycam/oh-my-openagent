@@ -77,7 +77,6 @@ function cloneRegisteredTask(task: BackgroundTask): BackgroundTask {
     isUnstableAgent: task.isUnstableAgent,
     error: task.error,
     category: task.category,
-    retryNotification: task.retryNotification ? { ...task.retryNotification } : undefined,
     attempts: cloneAttempts(task.attempts),
     currentAttemptID: task.currentAttemptID,
     lastMsgCount: task.lastMsgCount,

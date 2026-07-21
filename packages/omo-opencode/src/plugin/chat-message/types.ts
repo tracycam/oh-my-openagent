@@ -58,7 +58,6 @@ type TodoContinuationEnforcerHook = {
 export type ChatMessageHooks = {
   modelFallback?: ChatMessageHook | null
   stopContinuationGuard?: StopContinuationGuard | null
-  backgroundNotificationHook?: ChatMessageHook | null
   runtimeFallback?: ChatMessageHook | null
   keywordDetector?: ChatMessageHook | null
   thinkMode?: ChatMessageHook | null

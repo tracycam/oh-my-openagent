@@ -27,7 +27,7 @@ function isPureSleepCommand(command: string): boolean {
 export function createToolExecuteBeforeHandler(args: {
   ctx: PluginContext
   hooks: CreatedHooks
-  backgroundManager?: Pick<BackgroundManager, "hasActiveChildTasks" | "hasPendingParentWake">
+  backgroundManager?: Pick<BackgroundManager, "hasActiveChildTasks">
 }): (
   input: { tool: string; sessionID: string; callID: string },
   output: { args: Record<string, unknown> },
@@ -59,10 +59,7 @@ export function createToolExecuteBeforeHandler(args: {
 
       if (
         isPureSleepCommand(output.args.command)
-        && (
-          backgroundManager?.hasActiveChildTasks(input.sessionID) === true
-          || backgroundManager?.hasPendingParentWake(input.sessionID) === true
-        )
+        && backgroundManager?.hasActiveChildTasks(input.sessionID) === true
       ) {
         throw new Error(BACKGROUND_WAIT_BLOCK_MESSAGE)
       }

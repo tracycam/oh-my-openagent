@@ -11,7 +11,7 @@ Standalone feature modules wired into `plugin/` layer. Each is self-contained wi
 | Module | Complexity | Has sub-AGENTS.md | Purpose |
 |--------|------------|-------------------|---------|
 | **team-mode** | HIGH | yes | Parallel multi-agent coordination — 12 `team_*` tools; domain primitives live in `packages/team-core/` with OpenCode runtime/session wiring here |
-| **background-agent** | HIGH | yes | Task lifecycle, concurrency (5/key), 3s polling, spawner pattern, circuit breaker. Newer files include `parent-wake-notifier.ts`, `loop-detector`, `error-classifier`, `fallback-retry-handler`, `process-cleanup`, `subagent-spawn-limits`, `session-status-classifier`, and `compaction-aware-message-resolver`. |
+| **background-agent** | HIGH | yes | Task lifecycle, concurrency, polling, spawner pattern, circuit breaker, and one-shot terminal notification admission through OpenCode's normal prompt queue. |
 | **tmux-subagent** | HIGH | yes | Tmux pane management, grid planning, session orchestration via `runTmuxCommand`; reusable tmux primitives live in `packages/tmux-core/` |
 | **opencode-skill-loader** | HIGH | yes | OpenCode adapter for YAML frontmatter skill discovery; reusable loader primitives live in `packages/skills-loader-core/` |
 | **builtin-skills** | LOW–MED | yes | Built-in skill files (git-master, playwright, frontend, review-work, remove-ai-slops, init-deep, security-research, security-review, dev-browser, playwright-cli, **team-mode**, …) |
@@ -42,7 +42,7 @@ Core orchestration engine. `BackgroundManager` manages task lifecycle:
 - Polling: 3s interval, completion detected via idle event AND stability detection (10s unchanged)
 - Circuit breaker: automatic failure detection and recovery in `manager-circuit-breaker.test.ts`
 - `spawner/`: focused files composing via `SpawnerContext` interface
-- Parent-wake state extracted to `parent-wake-notifier.ts` (587 LOC, dependency-injected client + enqueue callback)
+- Terminal notification is intentionally stateless: one task, one admitted user-like message; only the all-finished message starts a parent turn.
 
 ### team-mode (~13k LOC)
 

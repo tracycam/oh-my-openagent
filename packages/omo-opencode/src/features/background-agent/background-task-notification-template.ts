@@ -48,64 +48,29 @@ function formatAttemptTimeline(task: BackgroundTaskNotificationTask): string {
   return `Background task attempts:\n${lines}`
 }
 
-function formatTaskSummaryLine(task: BackgroundTaskNotificationTask): string {
-  const baseLine = `- \`${task.id}\`: ${task.description || task.id}`
-  const statusSuffix = task.status === "completed"
-    ? ""
-    : ` [${task.status.toUpperCase()}]${task.error ? ` - ${task.error}` : ""}`
-  const timeline = formatAttemptTimeline(task)
-
-  return `${baseLine}${statusSuffix}${timeline ? `\n${timeline}` : ""}`
-}
-
 export function buildBackgroundTaskNotificationText(input: {
   task: BackgroundTaskNotificationTask
   duration: string
   statusText: BackgroundTaskNotificationStatus
   allComplete: boolean
   remainingCount: number
-  completedTasks: BackgroundTaskNotificationTask[]
 }): string {
-  const { task, duration, statusText, allComplete, remainingCount, completedTasks } = input
+  const { task, duration, statusText, allComplete, remainingCount } = input
 
   const safeDescription = (t: BackgroundTaskNotificationTask): string => t.description || t.id
   const errorInfo = task.error ? `\n**Error:** ${task.error}` : ""
+  const attemptTimeline = formatAttemptTimeline(task)
+  const attemptInfo = attemptTimeline ? `\n${attemptTimeline}` : ""
 
   if (allComplete) {
-    const succeededTasks = completedTasks.filter((t) => t.status === "completed")
-    const failedTasks = completedTasks.filter((t) => t.status !== "completed")
-
-    const succeededText = succeededTasks.length > 0
-      ? succeededTasks.map((t) => formatTaskSummaryLine(t)).join("\n")
-      : ""
-    const failedText = failedTasks.length > 0
-      ? failedTasks.map((t) => formatTaskSummaryLine(t)).join("\n")
-      : ""
-
-    const hasFailures = failedTasks.length > 0
-    const header = hasFailures
-      ? `[ALL BACKGROUND TASKS FINISHED - ${failedTasks.length} FAILED]`
-      : "[BACKGROUND TASK COMPLETED]\n[ALL BACKGROUND TASKS COMPLETE]"
-
-    let body = ""
-    if (succeededText) {
-      body += `**Completed:**\n${succeededText}\n`
-    }
-    if (failedText) {
-      body += `\n**Failed:**\n${failedText}\n`
-    }
-    if (!body) {
-      body = `${formatTaskSummaryLine(task)}\n`
-    }
-
-    const resultCollectionInstruction = "All sibling background tasks are complete. Your next action should be to call `background_output(task_id=\"<id>\")` for each task ID above."
-
     return `<system-reminder>
-${header}
+[BACKGROUND TASK ${statusText}]
+[ALL BACKGROUND TASKS FINISHED]
+**ID:** \`${task.id}\`
+**Description:** ${safeDescription(task)}
+**Duration:** ${duration}${errorInfo}${attemptInfo}
 
-${body.trim()}
-
-${resultCollectionInstruction}${hasFailures ? `\n\n**ACTION REQUIRED:** ${failedTasks.length} task(s) failed. Check errors above and decide whether to retry or proceed.` : ""}
+This was the final active background task. Use \`background_output(task_id="${task.id}")\` to retrieve its result.
 </system-reminder>`
   }
 
@@ -116,7 +81,7 @@ ${resultCollectionInstruction}${hasFailures ? `\n\n**ACTION REQUIRED:** ${failed
 ${header}
 **ID:** \`${task.id}\`
 **Description:** ${safeDescription(task)}
-**Duration:** ${duration}${errorInfo}
+**Duration:** ${duration}${errorInfo}${attemptInfo}
 
 **${remainingCount} task${remainingCount === 1 ? "" : "s"} still in progress.** You WILL be notified when ALL complete.
 ${isFailure ? "**ACTION REQUIRED:** This task failed. Check the error and decide whether to retry, cancel remaining tasks, or continue." : "Do NOT poll - continue productive work."}

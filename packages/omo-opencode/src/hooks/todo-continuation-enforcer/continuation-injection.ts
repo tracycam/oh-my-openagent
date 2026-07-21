@@ -89,7 +89,6 @@ export async function injectContinuation(args: {
 
   const hasRunningBgTasks = backgroundManager
     ? backgroundManager.getTasksByParentSession(sessionID).some((task: { status: string }) => task.status === "running" || task.status === "pending")
-      || backgroundManager.hasPendingParentWake?.(sessionID) === true
     : false
 
   if (hasRunningBgTasks) {
@@ -175,7 +174,6 @@ ${todoList}`
 
   const hasBackgroundWorkBeforeDispatch = backgroundManager
     ? backgroundManager.getTasksByParentSession(sessionID).some((task: { status: string }) => task.status === "running" || task.status === "pending")
-      || backgroundManager.hasPendingParentWake?.(sessionID) === true
     : false
 
   if (hasBackgroundWorkBeforeDispatch) {

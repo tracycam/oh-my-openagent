@@ -40,7 +40,6 @@ describe("createToolExecuteBeforeHandler background wait guard", () => {
     //#given
     const backgroundManager = {
       hasActiveChildTasks: () => false,
-      hasPendingParentWake: () => false,
     }
     const handler = createToolExecuteBeforeHandler({
       ctx: createTestContext(),
@@ -60,11 +59,10 @@ describe("createToolExecuteBeforeHandler background wait guard", () => {
     await expect(run).resolves.toBeUndefined()
   })
 
-  test("blocks placeholder sleep waits while a parent wake is pending", async () => {
+  test("allows placeholder sleep after all background children are terminal", async () => {
     //#given
     const backgroundManager = {
       hasActiveChildTasks: () => false,
-      hasPendingParentWake: (sessionID: string) => sessionID === "ses_parent",
     }
     const handler = createToolExecuteBeforeHandler({
       ctx: createTestContext(),
@@ -81,14 +79,13 @@ describe("createToolExecuteBeforeHandler background wait guard", () => {
     const run = handler({ tool: "bash", sessionID: "ses_parent", callID: "call_wake" }, output)
 
     //#then
-    await expect(run).rejects.toThrow("Background task wait is already managed")
+    await expect(run).resolves.toBeUndefined()
   })
 
   test("allows non-wait bash commands while background children are active", async () => {
     //#given
     const backgroundManager = {
       hasActiveChildTasks: () => true,
-      hasPendingParentWake: () => false,
     }
     const handler = createToolExecuteBeforeHandler({
       ctx: createTestContext(),

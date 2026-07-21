@@ -4,7 +4,7 @@
 
 ## OVERVIEW
 
-45 non-test files. Manages async task lifecycle: launch → queue → run → poll → complete/error. Concurrency limited per model/provider (default 5). Central to multi-agent orchestration.
+Manages async task lifecycle: launch → queue → run → poll → complete/error. Concurrency is limited per model/provider. Central to multi-agent orchestration.
 
 ## TASK LIFECYCLE
 
@@ -21,7 +21,7 @@ LaunchInput → pending → [ConcurrencyManager queue] → running → polling �
 | `concurrency.ts` | `ConcurrencyManager` — FIFO queue per concurrency key, slot acquisition/release |
 | `task-poller.ts` | 3s interval polling, completion via idle events + stability detection (10s unchanged) |
 | `types.ts` | `BackgroundTask`, `LaunchInput`, `ResumeInput`, `BackgroundTaskStatus` |
-| `parent-wake-notifier.ts` | 587 LOC. Dependency-injected client + enqueue callback. Notifies parent session when a background task wants attention. |
+| `background-task-notifier.ts` | One-shot terminal notification admission through OpenCode's ordinary user-message queue. |
 | `loop-detector.ts` | Detects polling/event loops that would otherwise burn budget. |
 | `error-classifier.ts` | Maps raw provider errors → `BackgroundTaskError` categories. |
 | `fallback-retry-handler.ts` | Coordinates retries with the runtime-fallback system. |
@@ -63,6 +63,4 @@ Both must agree before marking a task complete. Prevents premature completion on
 
 ## NOTIFICATION FLOW
 
-```
-task completed → result-handler → parent-session-notifier → inject system message into parent session
-```
+Every terminal task admits exactly one internal user-like message to the parent. Individual completions use `noReply`; the completion that makes the parent task set empty starts one turn. Admission ordering, delivery during an active turn, and idle wakeup belong to OpenCode's normal prompt queue. This module deliberately has no notification retry, watchdog, history scan, requeue, or dedupe state machine.
