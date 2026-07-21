@@ -67,6 +67,27 @@ describe("model-capability-aliases", () => {
     })
   })
 
+  test("normalizes Kimi for Coding's short K3 ID to the multimodal snapshot entry", () => {
+    const result = resolveModelIDAlias("k3", "kimi-for-coding")
+
+    expect(result).toEqual({
+      requestedModelID: "k3",
+      canonicalModelID: "kimi-k3",
+      source: "pattern-alias",
+      ruleID: "kimi-for-coding-k3-short-id-alias",
+    })
+  })
+
+  test("does not apply the K3 service alias to unrelated providers", () => {
+    const result = resolveModelIDAlias("k3", "other-provider")
+
+    expect(result).toEqual({
+      requestedModelID: "k3",
+      canonicalModelID: "k3",
+      source: "canonical",
+    })
+  })
+
   test("treats GitHub Copilot dotted Claude Opus 4.7 as canonical since models.dev now serves it natively", () => {
     const result = resolveModelIDAlias("github-copilot/claude-opus-4.7")
 

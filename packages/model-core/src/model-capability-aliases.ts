@@ -48,6 +48,13 @@ const EXACT_ALIAS_RULES_BY_MODEL: ReadonlyMap<string, ExactAliasRule> = new Map(
 
 const PATTERN_ALIAS_RULES: ReadonlyArray<PatternAliasRule> = [
   {
+    ruleID: "kimi-for-coding-k3-short-id-alias",
+    description: "Normalizes Kimi for Coding's short K3 service ID to the supplemental capability snapshot ID.",
+    providerIDs: ["kimi-for-coding"],
+    match: (normalizedModelID) => /^k3(?:[-.]?p?\d+)?$/.test(normalizedModelID),
+    canonicalize: () => "kimi-k3",
+  },
+  {
     ruleID: "openai-gpt-5.6-fast-service-tier-alias",
     description: "Normalizes OpenCode's OpenAI GPT-5.6 fast service-tier IDs to canonical snapshot IDs.",
     providerIDs: ["openai"],
