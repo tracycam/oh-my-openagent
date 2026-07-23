@@ -3,6 +3,7 @@ type MessageTime = { created?: number }
 type MessageInfo = {
   role?: string
   time?: MessageTime
+  error?: unknown
 }
 
 type MessagePart = {
@@ -31,6 +32,7 @@ function asSessionMessage(value: unknown): SessionMessage | null {
       ? {
           role: typeof info["role"] === "string" ? info["role"] : undefined,
           time: isObject(info["time"]) ? { created: typeof info["time"]["created"] === "number" ? info["time"]["created"] : undefined } : undefined,
+          error: info["error"],
         }
       : undefined,
     parts,
@@ -115,13 +117,14 @@ export function extractLatestAssistantText(messages: unknown): string | null {
 export interface AssistantOutcome {
   text: string | null
   errorName: string | null
+  errorMessage: string | null
   hasAssistant: boolean
   completed: boolean
 }
 
 export function extractLatestAssistantOutcome(messages: unknown): AssistantOutcome {
   if (!Array.isArray(messages) || messages.length === 0) {
-    return { text: null, errorName: null, hasAssistant: false, completed: false }
+    return { text: null, errorName: null, errorMessage: null, hasAssistant: false, completed: false }
   }
 
   const parsed = messages
@@ -136,7 +139,7 @@ export function extractLatestAssistantOutcome(messages: unknown): AssistantOutco
   const lastAssistantMessage = assistantMessages[0]
 
   if (!lastAssistantMessage) {
-    return { text: null, errorName: null, hasAssistant, completed: false }
+    return { text: null, errorName: null, errorMessage: null, hasAssistant, completed: false }
   }
 
   const text = extractTextFromParts(getTextParts(lastAssistantMessage))
@@ -145,10 +148,19 @@ export function extractLatestAssistantOutcome(messages: unknown): AssistantOutco
   const errorPart = allParts.find((part): part is Record<string, unknown> =>
     isObject(part) && typeof part["type"] === "string" && part["type"] === "error"
   )
-  const errorName = errorPart && typeof errorPart["error"] === "string" ? errorPart["error"] : null
+  const infoError = isObject(lastAssistantMessage.info?.error)
+    ? lastAssistantMessage.info.error
+    : null
+  const errorData = infoError && isObject(infoError["data"]) ? infoError["data"] : null
+  const errorName =
+    (infoError && typeof infoError["name"] === "string" ? infoError["name"] : null)
+    ?? (errorPart && typeof errorPart["error"] === "string" ? errorPart["error"] : null)
+  const errorMessage =
+    (errorData && typeof errorData["message"] === "string" ? errorData["message"] : null)
+    ?? (infoError && typeof infoError["message"] === "string" ? infoError["message"] : null)
 
   const lastMessage = parsed[parsed.length - 1]
   const completed = lastMessage?.info?.role === "assistant"
 
-  return { text, errorName, hasAssistant, completed }
+  return { text, errorName, errorMessage, hasAssistant, completed }
 }

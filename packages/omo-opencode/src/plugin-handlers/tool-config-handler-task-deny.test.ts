@@ -6,6 +6,7 @@ import { OhMyOpenCodeConfigSchema } from "../config"
 import { applyToolConfig } from "./tool-config-handler"
 
 type TestAgent = {
+  model?: string
   permission?: Record<string, unknown>
 }
 
@@ -65,6 +66,44 @@ describe("applyToolConfig task permission hard denials", () => {
           expect(permission.task).toBe("deny")
         })
       }
+    })
+  })
+
+  describe("#given model-native vision support", () => {
+    it.each([
+      ["kimi-for-coding/k3"],
+      ["openai/gpt-5.6-sol"],
+    ])("#then denies lossy look_at delegation for %s", (model) => {
+      const params = createParams(["sisyphus"])
+      params.agentResult.sisyphus = { model, permission: {} }
+
+      applyToolConfig(params)
+
+      expect(requirePermission(params.agentResult, "sisyphus").look_at).toBe("deny")
+    })
+
+    it("#then keeps look_at available for a text-only model", () => {
+      const params = createParams(["explore"])
+      params.agentResult.explore = {
+        model: "custom/text-only-model",
+        permission: {},
+      }
+
+      applyToolConfig(params)
+
+      expect(requirePermission(params.agentResult, "explore").look_at).toBeUndefined()
+    })
+
+    it("#then preserves an explicit look_at allow override", () => {
+      const params = createParams(["sisyphus"])
+      params.agentResult.sisyphus = {
+        model: "openai/gpt-5.6-sol",
+        permission: { look_at: "allow" },
+      }
+
+      applyToolConfig(params)
+
+      expect(requirePermission(params.agentResult, "sisyphus").look_at).toBe("allow")
     })
   })
 

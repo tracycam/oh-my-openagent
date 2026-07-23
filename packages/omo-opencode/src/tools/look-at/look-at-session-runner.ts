@@ -89,11 +89,13 @@ Original error: ${createResult.error}`
 
   let observedMessages: unknown[] | undefined
   let observedText: string | undefined
+  let observedError: string | undefined
   if (shouldWaitForStatus && typeof ctx.client.session.status === "function") {
     const waitResult = await waitForLookAtSessionResult(ctx.client, sessionID, {
       allowStableIdleWithoutActivity: true,
     })
     observedText = waitResult.outcome.text ?? undefined
+    observedError = waitResult.outcome.errorMessage ?? waitResult.outcome.errorName ?? undefined
     if (observedText) {
       observedMessages = waitResult.messages
     }
@@ -117,6 +119,9 @@ Original error: ${createResult.error}`
   const responseText = observedText ?? extractLatestAssistantText(messages)
   if (!responseText) {
     log("[look_at] No assistant message found")
+    if (observedError) {
+      return `Error: multimodal-looker failed: ${observedError}`
+    }
     return "Error: No response from multimodal-looker agent"
   }
 

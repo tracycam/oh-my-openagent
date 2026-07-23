@@ -86,6 +86,34 @@ describe("assistant-message-extractor", () => {
     expect(outcome).toEqual({
       text: "Recovered result",
       errorName: "ProviderError",
+      errorMessage: null,
+      hasAssistant: true,
+      completed: true,
+    })
+  })
+
+  test("extracts a provider error from assistant message metadata", () => {
+    const outcome = extractLatestAssistantOutcome([
+      {
+        info: {
+          role: "assistant",
+          time: { created: 1 },
+          error: {
+            name: "APIError",
+            data: {
+              message: "You've reached your usage limit for this billing cycle.",
+              statusCode: 403,
+            },
+          },
+        },
+        parts: [],
+      },
+    ])
+
+    expect(outcome).toEqual({
+      text: null,
+      errorName: "APIError",
+      errorMessage: "You've reached your usage limit for this billing cycle.",
       hasAssistant: true,
       completed: true,
     })

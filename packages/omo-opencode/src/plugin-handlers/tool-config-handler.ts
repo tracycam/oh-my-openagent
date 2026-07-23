@@ -1,8 +1,11 @@
 import type { OhMyOpenCodeConfig } from "../config";
 import { getAgentDisplayName, getAgentListDisplayName } from "../shared/agent-display-names";
-import { isTaskSystemEnabled } from "../shared";
+import { getModelCapabilities, isTaskSystemEnabled } from "../shared";
 
-type AgentWithPermission = { permission?: Record<string, unknown> };
+type AgentWithPermission = {
+  model?: string;
+  permission?: Record<string, unknown>;
+};
 
 const TASK_DENIED_SUBAGENT_KEYS = [
   "librarian",
@@ -43,6 +46,26 @@ function denyTaskForAgent(
   const agent = agentByKey(agentResult, key, pluginConfig);
   if (!agent) return;
   agent.permission = { ...agent.permission, task: "deny" };
+}
+
+function supportsNativeImageInput(model: string | undefined): boolean {
+  if (!model) return false;
+  const [providerID, ...modelIDParts] = model.split("/");
+  const modelID = modelIDParts.join("/");
+  if (!providerID || !modelID) return false;
+
+  const capabilities = getModelCapabilities({ providerID, modelID });
+  return capabilities.modalities?.input?.includes("image") === true;
+}
+
+function denyLookAtForNativeVisionAgents(agentResult: Record<string, unknown>): void {
+  for (const value of Object.values(agentResult)) {
+    if (!value || typeof value !== "object") continue;
+    const agent = value as AgentWithPermission;
+    if (!supportsNativeImageInput(agent.model)) continue;
+    if (agent.permission?.look_at !== undefined) continue;
+    agent.permission = { ...agent.permission, look_at: "deny" };
+  }
 }
 
 export function applyToolConfig(params: {
@@ -86,6 +109,7 @@ export function applyToolConfig(params: {
   for (const agentKey of TASK_DENIED_SUBAGENT_KEYS) {
     denyTaskForAgent(params.agentResult, agentKey, params.pluginConfig);
   }
+  denyLookAtForNativeVisionAgents(params.agentResult);
 
   const librarian = agentByKey(params.agentResult, "librarian", params.pluginConfig);
   if (librarian) {
