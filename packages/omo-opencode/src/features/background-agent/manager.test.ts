@@ -6119,6 +6119,98 @@ describe("BackgroundManager.handleEvent - session.error", () => {
     manager.shutdown()
   })
 
+  test("terminates a quota-exhausted task and notifies its parent while the session shell remains alive", async () => {
+    //#given
+    const manager = createBackgroundManager()
+    mockVerifySessionExists(manager, true)
+    const notifyParentSession = mock(async (_task: BackgroundTask) => {})
+    ;(cast<{ notifyParentSession: (task: BackgroundTask) => Promise<void> }>(manager)).notifyParentSession = notifyParentSession
+    const task = createMockTask({
+      id: "task-terminal-quota-alive",
+      sessionId: "ses-terminal-quota-alive",
+      parentSessionId: "parent-terminal-quota",
+      parentMessageId: "msg-terminal-quota",
+      description: "task with exhausted billing-cycle quota",
+      agent: "explore",
+      status: "running",
+    })
+    getTaskMap(manager).set(task.id, task)
+    getPendingByParent(manager).set(task.parentSessionId, new Set([task.id]))
+
+    //#when
+    manager.handleEvent({
+      type: "session.error",
+      properties: {
+        sessionID: task.sessionId,
+        error: {
+          name: "APIError",
+          data: {
+            message: "You've reached your usage limit for this billing cycle.",
+            statusCode: 403,
+            isRetryable: false,
+          },
+        },
+      },
+    })
+    await flushBackgroundNotifications()
+
+    //#then
+    expect(task.status).toBe("error")
+    expect(task.error).toContain("usage limit")
+    expect(getPendingByParent(manager).get(task.parentSessionId)).toBeUndefined()
+    expect(notifyParentSession).toHaveBeenCalledWith(task)
+
+    manager.shutdown()
+  })
+
+  test("finalizes and notifies from message.updated when a terminal assistant error has no matching session.error event", async () => {
+    //#given
+    const manager = createBackgroundManager()
+    mockVerifySessionExists(manager, true)
+    const notifyParentSession = mock(async (_task: BackgroundTask) => {})
+    ;(cast<{ notifyParentSession: (task: BackgroundTask) => Promise<void> }>(manager)).notifyParentSession = notifyParentSession
+    const task = createMockTask({
+      id: "task-message-updated-terminal-quota",
+      sessionId: "ses-message-updated-terminal-quota",
+      parentSessionId: "parent-message-updated-terminal-quota",
+      parentMessageId: "msg-message-updated-terminal-quota",
+      description: "task whose only terminal signal is an assistant update",
+      agent: "explore",
+      status: "running",
+    })
+    getTaskMap(manager).set(task.id, task)
+    getPendingByParent(manager).set(task.parentSessionId, new Set([task.id]))
+
+    //#when
+    manager.handleEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "msg-terminal-assistant-error",
+          sessionID: task.sessionId,
+          role: "assistant",
+          error: {
+            name: "APIError",
+            data: {
+              message: "You've reached your usage limit for this billing cycle.",
+              statusCode: 403,
+              isRetryable: false,
+            },
+          },
+        },
+      },
+    })
+    await flushBackgroundNotifications()
+
+    //#then
+    expect(task.status).toBe("error")
+    expect(task.error).toContain("usage limit")
+    expect(getPendingByParent(manager).get(task.parentSessionId)).toBeUndefined()
+    expect(notifyParentSession).toHaveBeenCalledWith(task)
+
+    manager.shutdown()
+  })
+
   test.each([
     ["model lookup failure", "ProviderModelNotFoundError", "Model not found: openai/gpt-missing"],
     ["credential failure", "MissingApiKeyError", "Google Generative AI API key is missing"],

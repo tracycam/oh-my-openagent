@@ -391,9 +391,20 @@ describe("isTerminalSessionError", () => {
       ["all providers unavailable"],
       ["all providers are disconnected"],
       ["all providers exhausted"],
+      ["You've reached your usage limit for this billing cycle"],
+      ["Subscription quota exceeded. You can continue using free models."],
     ])("classifies %s as terminal", (message) => {
       expect(isTerminalSessionError({ message })).toBe(true)
     })
+  })
+
+  describe("#given terminal HTTP client errors", () => {
+    test.each([400, 401, 402, 403, 404, 413, 422])(
+      "classifies HTTP %s as terminal",
+      (statusCode) => {
+        expect(isTerminalSessionError({ statusCode, message: "request failed" })).toBe(true)
+      },
+    )
   })
 
   describe("#given transient/recoverable errors", () => {
@@ -408,6 +419,13 @@ describe("isTerminalSessionError", () => {
     ])("does NOT classify %s as terminal", (message) => {
       expect(isTerminalSessionError({ message })).toBe(false)
     })
+
+    test.each([408, 409, 425, 429, 500, 502, 503, 504])(
+      "does NOT classify HTTP %s as terminal",
+      (statusCode) => {
+        expect(isTerminalSessionError({ statusCode, message: "temporarily unavailable" })).toBe(false)
+      },
+    )
   })
 
   describe("#given empty or missing error info", () => {

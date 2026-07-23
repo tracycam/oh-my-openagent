@@ -1,4 +1,5 @@
 import { isRecord } from "@oh-my-opencode/utils"
+import { isProviderExhaustionFallbackEligible } from "@oh-my-opencode/model-core"
 export { isRecord }
 
 export function isAbortedSessionError(error: unknown): boolean {
@@ -149,6 +150,18 @@ const TERMINAL_SESSION_ERROR_PATTERNS: readonly RegExp[] = [
 export function isTerminalSessionError(
   errorInfo: { name?: string; message?: string; statusCode?: number },
 ): boolean {
+  if (isProviderExhaustionFallbackEligible(errorInfo)) return true
+
+  const statusCode = errorInfo.statusCode
+  if (
+    statusCode !== undefined &&
+    statusCode >= 400 &&
+    statusCode < 500 &&
+    ![408, 409, 425, 429].includes(statusCode)
+  ) {
+    return true
+  }
+
   const text = [
     errorInfo?.name,
     errorInfo?.message,

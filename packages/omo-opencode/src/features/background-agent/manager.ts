@@ -1421,8 +1421,14 @@ export class BackgroundManager {
         message: extractErrorMessage(assistantError),
         statusCode: extractErrorStatusCode(assistantError),
       }
-      void this.tryFallbackRetry(task, errorInfo, "message.updated").catch((error) => {
-        log("[background-agent] Error handling message.updated fallback retry:", {
+      void this.handleSessionErrorEvent({
+        errorInfo,
+        errorMessage: errorInfo.message,
+        errorName: errorInfo.name,
+        source: "message.updated",
+        task,
+      }).catch((error) => {
+        log("[background-agent] Error handling message.updated assistant error:", {
           error,
           taskId: task.id,
         })
@@ -1565,11 +1571,16 @@ export class BackgroundManager {
       const errorName = errorObj?.name
       const errorMessage = props ? getSessionErrorMessage(props) : undefined
 
-      const errorInfo = { name: errorName, message: errorMessage }
+      const errorInfo = {
+        name: errorName,
+        message: errorMessage,
+        statusCode: extractErrorStatusCode(errorObj),
+      }
       void this.handleSessionErrorEvent({
         errorInfo,
         errorMessage,
         errorName,
+        source: "session.error",
         task,
       }).catch((error) => {
         log("[background-agent] Error handling session.error event:", {
@@ -1721,8 +1732,11 @@ export class BackgroundManager {
     errorInfo: { name?: string; message?: string; statusCode?: number }
     errorName: string | undefined
     errorMessage: string | undefined
+    source?: string
   }): Promise<void> {
-    const { task, errorInfo, errorMessage, errorName } = args
+    const { task, errorInfo, errorMessage, errorName, source = "session.error" } = args
+
+    if (task.status !== "running") return
 
     if (!task.fallbackChain && task.sessionId) {
       const sessionFallbackChain = this.modelFallbackControllerAccessor?.getSessionFallbackChain(task.sessionId)
@@ -1744,7 +1758,7 @@ export class BackgroundManager {
       return
     }
 
-    if (await this.tryFallbackRetry(task, errorInfo, "session.error")) {
+    if (await this.tryFallbackRetry(task, errorInfo, source)) {
       return
     }
 
@@ -1781,6 +1795,8 @@ export class BackgroundManager {
         })
       }
     }
+
+    if (task.status !== "running") return
 
     if (task.currentAttemptID) {
       finalizeAttempt(task, task.currentAttemptID, "error", errorMsg)
